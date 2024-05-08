@@ -24,8 +24,8 @@ pub struct ReactionStoreDef {
 }
 
 impl StoreDef for ReactionStoreDef {
-    fn postfix(&self) -> u8 {
-        UserPostfix::ReactionMessage.as_u8()
+    fn postfix(&self) -> UserPostfix {
+        UserPostfix::ReactionMessage
     }
 
     fn add_message_type(&self) -> u8 {

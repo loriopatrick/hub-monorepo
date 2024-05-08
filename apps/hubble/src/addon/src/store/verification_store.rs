@@ -3,8 +3,8 @@ use super::{
     read_fid_key,
     store::{Store, StoreDef},
     utils::{self, encode_messages_to_js_object, get_page_options, get_store},
-    HubError, MessagesPage, PageOptions, RootPrefix, StoreEventHandler, UserPostfix, FID_BYTES,
-    TS_HASH_LENGTH,
+    HubError, MessagePrimaryKey, MessagesPage, PageOptions, RootPrefix, StoreEventHandler,
+    UserPostfix, FID_BYTES, TS_HASH_LENGTH,
 };
 use crate::{
     db::{RocksDB, RocksDbTransactionBatch},
@@ -29,8 +29,8 @@ pub struct VerificationStoreDef {
 }
 
 impl StoreDef for VerificationStoreDef {
-    fn postfix(&self) -> u8 {
-        UserPostfix::VerificationMessage as u8
+    fn postfix(&self) -> UserPostfix {
+        UserPostfix::VerificationMessage
     }
 
     fn add_message_type(&self) -> u8 {
@@ -272,9 +272,7 @@ impl StoreDef for VerificationStoreDef {
 
                     let existing_message = get_message(
                         db,
-                        fid,
-                        self.postfix(),
-                        &utils::vec_to_u8_24(&Some(existing_ts_hash))?,
+                        &MessagePrimaryKey::new(fid, self.postfix(), &existing_ts_hash)?,
                     )?;
                     if existing_message.is_some() {
                         conflicts.push(existing_message.unwrap());

@@ -27,8 +27,8 @@ pub struct UserDataStoreDef {
 }
 
 impl StoreDef for UserDataStoreDef {
-    fn postfix(&self) -> u8 {
-        UserPostfix::UserDataMessage as u8
+    fn postfix(&self) -> UserPostfix {
+        UserPostfix::UserDataMessage
     }
 
     fn add_message_type(&self) -> u8 {

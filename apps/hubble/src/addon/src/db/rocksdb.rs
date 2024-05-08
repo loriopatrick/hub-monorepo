@@ -343,11 +343,36 @@ impl RocksDB {
         iter.seek_to_first();
         while iter.valid() {
             count += 1;
-
             iter.next();
         }
 
         Ok(count)
+    }
+
+    /**
+     * Count the number of keys with a given prefix.
+     */
+    pub fn first_entry_and_total_from_prefix(&self, prefix: &[u8]) -> Option<(&[u8], u32)> {
+        let iter_opts = RocksDB::get_iterator_options(prefix, &PageOptions::default());
+
+        let db = self.db();
+        let mut iter = db.as_ref().unwrap().raw_iterator_opt(iter_opts.opts);
+
+        iter.seek_to_first();
+        if !iter.valid() {
+            return None;
+        }
+
+        let mut count = 1;
+        let key = iter.key().unwrap();
+        iter.next();
+
+        while iter.valid() {
+            count += 1;
+            iter.next();
+        }
+
+        Some((key, count))
     }
 
     /**
@@ -1011,7 +1036,7 @@ impl RocksDB {
             .to_string();
 
         let start = std::time::SystemTime::now();
-        info!(logger, "Creating chunked tar.gz snapshot for directory: {}", 
+        info!(logger, "Creating chunked tar.gz snapshot for directory: {}",
             input_dir; o!("output_file_path" => &chunked_output_dir, "base_name" => &base_name));
 
         let mut multi_chunk_writer = MultiChunkWriter::new(
@@ -1070,7 +1095,7 @@ impl RocksDB {
         let triedb_backup_path = triedb_backup_path.into_os_string().into_string().unwrap();
 
         let start = std::time::SystemTime::now();
-        info!(snapshot_logger, "Creating snapshot for main DB: {}", main_db_path; 
+        info!(snapshot_logger, "Creating snapshot for main DB: {}", main_db_path;
         o!("output_file_path_main" => &main_backup_path, "output_file_path_trie" => &triedb_backup_path));
 
         let backup_main = DB::open_default(&main_backup_path)

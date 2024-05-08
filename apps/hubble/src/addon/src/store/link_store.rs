@@ -610,8 +610,8 @@ impl LinkStore {
 }
 
 impl StoreDef for LinkStore {
-    fn postfix(&self) -> u8 {
-        UserPostfix::LinkMessage.as_u8()
+    fn postfix(&self) -> UserPostfix {
+        UserPostfix::LinkMessage
     }
 
     fn add_message_type(&self) -> u8 {

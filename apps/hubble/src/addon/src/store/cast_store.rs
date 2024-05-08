@@ -3,8 +3,8 @@ use super::{
     make_user_key, message,
     store::{Store, StoreDef},
     utils::{encode_messages_to_js_object, get_page_options, get_store},
-    HubError, MessagesPage, PageOptions, RootPrefix, StoreEventHandler, UserPostfix, HASH_LENGTH,
-    PAGE_SIZE_MAX, TRUE_VALUE, TS_HASH_LENGTH,
+    HubError, MessageActionKey, MessagePrimaryKey, MessagesPage, PageOptions, RootPrefix,
+    StoreEventHandler, UserPostfix, HASH_LENGTH, PAGE_SIZE_MAX, TRUE_VALUE, TS_HASH_LENGTH,
 };
 use crate::{
     db::{RocksDB, RocksDbTransactionBatch},
@@ -57,8 +57,8 @@ pub struct CastStoreDef {
 }
 
 impl StoreDef for CastStoreDef {
-    fn postfix(&self) -> u8 {
-        UserPostfix::CastMessage as u8
+    fn postfix(&self) -> UserPostfix {
+        UserPostfix::CastMessage
     }
 
     fn add_message_type(&self) -> u8 {
@@ -99,7 +99,7 @@ impl StoreDef for CastStoreDef {
         // Look up the remove tsHash for this cast
         let remove_key = self.make_remove_key(message)?;
         // If remove tsHash exists, fail because this cast has already been removed
-        if let Ok(Some(_)) = db.get(&remove_key) {
+        if let Ok(Some(_)) = db.get(remove_key.as_slice()) {
             return Err(HubError {
                 code: "bad_request.conflict".to_string(),
                 message: "message conflicts with a CastRemove".to_string(),
@@ -109,7 +109,7 @@ impl StoreDef for CastStoreDef {
         // Look up the add tsHash for this cast
         let add_key = self.make_add_key(message)?;
         // If add tsHash exists, no-op because this cast has already been added
-        if let Ok(Some(_)) = db.get(&add_key) {
+        if let Ok(Some(_)) = db.get(add_key.as_slice()) {
             return Err(HubError {
                 code: "bad_request.duplicate".to_string(),
                 message: "message has already been merged".to_string(),
@@ -193,7 +193,7 @@ impl StoreDef for CastStoreDef {
         Ok(())
     }
 
-    fn make_add_key(&self, message: &protos::Message) -> Result<Vec<u8>, HubError> {
+    fn make_add_key(&self, message: &protos::Message) -> Result<MessageActionKey, HubError> {
         let hash = match message.data.as_ref().unwrap().body.as_ref() {
             Some(message_data::Body::CastAddBody(_)) => message.hash.as_ref(),
             Some(message_data::Body::CastRemoveBody(cast_remove_body)) => {
@@ -206,13 +206,15 @@ impl StoreDef for CastStoreDef {
                 })
             }
         };
-        Ok(Self::make_cast_adds_key(
+
+        MessageActionKey::new(
             message.data.as_ref().unwrap().fid as u32,
+            UserPostfix::CastAdds,
             hash,
-        ))
+        )
     }
 
-    fn make_remove_key(&self, message: &protos::Message) -> Result<Vec<u8>, HubError> {
+    fn make_remove_key(&self, message: &protos::Message) -> Result<MessageActionKey, HubError> {
         let hash = match message.data.as_ref().unwrap().body.as_ref() {
             Some(message_data::Body::CastAddBody(_)) => message.hash.as_ref(),
             Some(message_data::Body::CastRemoveBody(cast_remove_body)) => {
@@ -226,10 +228,15 @@ impl StoreDef for CastStoreDef {
             }
         };
 
-        Ok(Self::make_cast_removes_key(
+        MessageActionKey::new(
             message.data.as_ref().unwrap().fid as u32,
+            UserPostfix::CastRemoves,
             hash,
-        ))
+        )
+        .ok_or_else(|| HubError {
+            code: "bad_request.validation_failure".to_string(),
+            message: "Invalid hash".to_string(),
+        })
     }
 
     fn make_compact_state_add_key(&self, _message: &Message) -> Result<Vec<u8>, HubError> {
@@ -363,7 +370,7 @@ impl CastStoreDef {
 
     // Generates unique keys used to store or fetch CastRemove messages in the removes set index
     pub fn make_cast_removes_key(fid: u32, hash: &Vec<u8>) -> Vec<u8> {
-        let mut key = Vec::with_capacity(5 + 1 + 20);
+        let mut key: Vec<u8> = Vec::with_capacity(5 + 1 + 20);
 
         key.extend_from_slice(&make_user_key(fid));
         key.push(UserPostfix::CastRemoves as u8); // CastAdds postfix, 1 byte

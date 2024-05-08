@@ -1,4 +1,4 @@
-use super::{store::HubError, PageOptions, PAGE_SIZE_MAX};
+use super::{store::HubError, MessagePrimaryKey, PageOptions, PAGE_SIZE_MAX};
 use crate::{
     db::{RocksDB, RocksDbTransactionBatch},
     protos::{CastId, Message as MessageProto, MessageData, MessageType},
@@ -15,6 +15,8 @@ pub const TRUE_VALUE: u8 = 1;
 
 /** Copied from the JS code */
 #[allow(dead_code)]
+#[derive(Copy, Clone, PartialEq, Eq)]
+#[repr(u8)]
 pub enum RootPrefix {
     /* Used for multiple purposes, starts with a 4-byte fid */
     User = 1,
@@ -76,6 +78,7 @@ pub enum RootPrefix {
 }
 
 /** Copied from the JS code */
+#[derive(Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum UserPostfix {
     /* Message records (1-85) */
@@ -274,14 +277,9 @@ pub fn make_cast_id_key(cast_id: &CastId) -> Vec<u8> {
 
 pub fn get_message(
     db: &RocksDB,
-    fid: u32,
-    set: u8,
-    ts_hash: &[u8; TS_HASH_LENGTH],
+    key: &MessagePrimaryKey,
 ) -> Result<Option<MessageProto>, HubError> {
-    let key = make_message_primary_key(fid, set, Some(ts_hash));
-    // println!("get_message key: {:?}", key);
-
-    match db.get(&key)? {
+    match db.get(key.as_ref())? {
         Some(bytes) => match message_decode(bytes.as_slice()) {
             Ok(message) => Ok(Some(message)),
             Err(_) => Err(HubError {

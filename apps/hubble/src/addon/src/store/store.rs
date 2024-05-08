@@ -2,7 +2,8 @@ use super::{
     bytes_compare, delete_message_transaction, get_message, hub_error_to_js_throw,
     make_message_primary_key, message, message_decode, message_encode, put_message_transaction,
     utils::{self, encode_messages_to_js_object, get_page_options, get_store, vec_to_u8_24},
-    MessagesPage, StoreEventHandler, TS_HASH_LENGTH,
+    MessageActionKey, MessagePrimaryKey, MessagesPage, StoreEventHandler, UserKeyHeader,
+    TS_HASH_LENGTH,
 };
 use crate::{
     db::{RocksDB, RocksDbTransactionBatch},
@@ -13,6 +14,7 @@ use crate::{
     store::make_ts_hash,
 };
 use crate::{logger::LOGGER, THREAD_POOL};
+use lru::LruCache;
 use neon::types::{Finalize, JsBuffer, JsNumber, JsString};
 use neon::{context::Context, types::JsArray};
 use neon::{context::FunctionContext, result::JsResult, types::JsPromise};
@@ -20,9 +22,9 @@ use neon::{object::Object, types::buffer::TypedArray};
 use prost::Message as _;
 use rocksdb;
 use slog::{o, warn};
-use std::string::ToString;
 use std::sync::{Arc, Mutex};
 use std::{clone::Clone, fmt::Display};
+use std::{mem::MaybeUninit, num::NonZeroUsize, string::ToString, sync::MutexGuard};
 
 #[derive(Debug, PartialEq)]
 pub struct HubError {
@@ -107,7 +109,7 @@ pub struct PageOptions {
 /// Some methods in this trait provide default implementations. These methods can be overridden
 /// by implementing the trait for a specific type.
 pub trait StoreDef: Send + Sync {
-    fn postfix(&self) -> u8;
+    fn postfix(&self) -> UserPostfix;
     fn add_message_type(&self) -> u8;
     fn remove_message_type(&self) -> u8;
     fn compact_state_message_type(&self) -> u8;
@@ -148,8 +150,8 @@ pub trait StoreDef: Send + Sync {
     fn find_merge_add_conflicts(&self, db: &RocksDB, message: &Message) -> Result<(), HubError>;
     fn find_merge_remove_conflicts(&self, db: &RocksDB, message: &Message) -> Result<(), HubError>;
 
-    fn make_add_key(&self, message: &Message) -> Result<Vec<u8>, HubError>;
-    fn make_remove_key(&self, message: &Message) -> Result<Vec<u8>, HubError>;
+    fn make_add_key(&self, message: &Message) -> Result<MessageActionKey, HubError>;
+    fn make_remove_key(&self, message: &Message) -> Result<MessageActionKey, HubError>;
     fn make_compact_state_add_key(&self, message: &Message) -> Result<Vec<u8>, HubError>;
 
     fn get_prune_size_limit(&self) -> u32;
@@ -184,10 +186,10 @@ pub trait StoreDef: Send + Sync {
             let remove_key = self.make_remove_key(message)?;
             let remove_ts_hash = db.get(&remove_key)?;
 
-            if remove_ts_hash.is_some() {
+            if Some(remove_ts_hash) = remove_ts_hash {
                 let remove_compare = self.message_compare(
                     self.remove_message_type(),
-                    &remove_ts_hash.clone().unwrap(),
+                    &remove_ts_hash,
                     message.data.as_ref().unwrap().r#type as u8,
                     &ts_hash.to_vec(),
                 );
@@ -209,16 +211,18 @@ pub trait StoreDef: Send + Sync {
                 // Remove message and delete it as part of the RocksDB transaction
                 let maybe_existing_remove = get_message(
                     &db,
-                    message.data.as_ref().unwrap().fid as u32,
-                    self.postfix(),
-                    &utils::vec_to_u8_24(&remove_ts_hash)?,
+                    &MessagePrimaryKey::new(
+                        message.data.as_ref().unwrap().fid as u32,
+                        self.postfix(),
+                        &remove_ts_hash,
+                    )?,
                 )?;
 
                 if maybe_existing_remove.is_some() {
                     conflicts.push(maybe_existing_remove.unwrap());
                 } else {
-                    warn!(LOGGER, "Message's ts_hash exists but message not found in store"; 
-                        o!("remove_ts_hash" => format!("{:x?}", remove_ts_hash.unwrap())));
+                    warn!(LOGGER, "Message's ts_hash exists but message not found in store";
+                        o!("remove_ts_hash" => format!("{:x?}", remove_ts_hash)));
                 }
             }
         }
@@ -227,10 +231,10 @@ pub trait StoreDef: Send + Sync {
         let add_key = self.make_add_key(message)?;
         let add_ts_hash = db.get(&add_key)?;
 
-        if add_ts_hash.is_some() {
+        if let Some(add_ts_hash) = add_ts_hash {
             let add_compare = self.message_compare(
                 self.add_message_type(),
-                &add_ts_hash.clone().unwrap(),
+                &add_ts_hash,
                 message.data.as_ref().unwrap().r#type as u8,
                 &ts_hash.to_vec(),
             );
@@ -252,14 +256,16 @@ pub trait StoreDef: Send + Sync {
             // Add message and delete it as part of the RocksDB transaction
             let maybe_existing_add = get_message(
                 &db,
-                message.data.as_ref().unwrap().fid as u32,
-                self.postfix(),
-                &utils::vec_to_u8_24(&add_ts_hash)?,
+                &MessagePrimaryKey::new(
+                    message.data.as_ref().unwrap().fid as u32,
+                    self.postfix(),
+                    &add_ts_hash,
+                )?,
             )?;
 
             if maybe_existing_add.is_none() {
-                warn!(LOGGER, "Message's ts_hash exists but message not found in store"; 
-                    o!("add_ts_hash" => format!("{:x?}", add_ts_hash.unwrap())));
+                warn!(LOGGER, "Message's ts_hash exists but message not found in store";
+                    o!("add_ts_hash" => format!("{:x?}", add_ts_hash)));
             } else {
                 conflicts.push(maybe_existing_add.unwrap());
             }
@@ -331,9 +337,19 @@ pub trait StoreDef: Send + Sync {
 pub struct Store {
     store_def: Box<dyn StoreDef>,
     store_event_handler: Arc<StoreEventHandler>,
-    fid_locks: Arc<[Mutex<()>; 4]>,
+    fid_caches: Vec<[Mutex<FidInfoCache>]>,
     db: Arc<RocksDB>,
     logger: slog::Logger,
+}
+
+struct FidInfoCache {
+    store_prefix: u8,
+    cache_entries: LruCache<u32, FidInfoCacheEntry>,
+}
+
+struct FidInfoCacheEntry {
+    total_messages: u32,
+    earliest_timestamp_hash: [u8; TS_HASH_LENGTH],
 }
 
 impl Finalize for Store {
@@ -349,12 +365,13 @@ impl Store {
         Store {
             store_def,
             store_event_handler,
-            fid_locks: Arc::new([
-                Mutex::new(()),
-                Mutex::new(()),
-                Mutex::new(()),
-                Mutex::new(()),
-            ]),
+            fid_caches: {
+                let mut items = Vec::with_capacity(FID_LOCKS_COUNT);
+                for _ in 0..FID_LOCKS_COUNT {
+                    items.push(Mutex::new(FidInfoCache::new()));
+                }
+                items
+            },
             db,
             logger: LOGGER.new(o!("component" => "Store")),
         }
@@ -393,17 +410,15 @@ impl Store {
         }
 
         let adds_key = self.store_def.make_add_key(partial_message)?;
-        let message_ts_hash = self.db.get(&adds_key)?;
-
-        if message_ts_hash.is_none() {
-            return Ok(None);
-        }
+        let Some(message_ts_hash) = self.db.get(&adds_key)? else { return Ok(None) };
 
         get_message(
             &self.db,
-            partial_message.data.as_ref().unwrap().fid as u32,
-            self.store_def.postfix(),
-            &utils::vec_to_u8_24(&message_ts_hash)?,
+            &MessagePrimaryKey::new(
+                partial_message.data.as_ref().unwrap().fid as u32,
+                self.store_def.postfix(),
+                &message_ts_hash,
+            )?,
         )
     }
 
@@ -427,17 +442,15 @@ impl Store {
         }
 
         let removes_key = self.store_def.make_remove_key(partial_message)?;
-        let message_ts_hash = self.db.get(&removes_key)?;
-
-        if message_ts_hash.is_none() {
-            return Ok(None);
-        }
+        let Some(message_ts_hash) = self.db.get(&removes_key)? else { return Ok(None); };
 
         get_message(
             &self.db,
-            partial_message.data.as_ref().unwrap().fid as u32,
-            self.store_def.postfix(),
-            &utils::vec_to_u8_24(&message_ts_hash)?,
+            &MessagePrimaryKey::new(
+                partial_message.data.as_ref().unwrap().fid as u32,
+                self.store_def.postfix(),
+                &message_ts_hash,
+            ),
         )
     }
 
@@ -450,12 +463,16 @@ impl Store {
     where
         F: Fn(&protos::Message) -> bool,
     {
-        let prefix = make_message_primary_key(fid, self.store_def.postfix(), None);
-        let messages_page =
-            message::get_messages_page_by_prefix(&self.db, &prefix, &page_options, |message| {
+        let prefix = UserKeyHeader::new(fid, self.store_def.postfix());
+        let messages_page = message::get_messages_page_by_prefix(
+            &self.db,
+            prefix.as_slice(),
+            &page_options,
+            |message| {
                 self.store_def.is_add_type(&message)
                     && filter.as_ref().map(|f| f(&message)).unwrap_or(true)
-            })?;
+            },
+        )?;
 
         Ok(messages_page)
     }
@@ -476,12 +493,16 @@ impl Store {
             });
         }
 
-        let prefix = make_message_primary_key(fid, self.store_def.postfix(), None);
-        let messages =
-            message::get_messages_page_by_prefix(&self.db, &prefix, &page_options, |message| {
+        let prefix = UserKeyHeader::new(fid, self.store_def.postfix());
+        let messages = message::get_messages_page_by_prefix(
+            &self.db,
+            prefix.as_slice(),
+            &page_options,
+            |message| {
                 self.store_def.is_remove_type(&message)
                     && filter.as_ref().map(|f| f(&message)).unwrap_or(true)
-            })?;
+            },
+        )?;
 
         Ok(messages)
     }
@@ -615,14 +636,19 @@ impl Store {
         Ok(())
     }
 
-    pub fn merge(&self, message: &Message) -> Result<Vec<u8>, HubError> {
-        // Grab a merge lock. The typescript code does this by individual fid, but we don't have a
+    pub fn merge(&self, message: &Message, max_mesages_for_fid: u32) -> Result<Vec<u8>, HubError> {
+        let msg_data = message.data.as_ref().unwrap();
+        let fid: u32 = msg_data.fid;
+
+        // Important: Hold an exclusive lock for the given fid to ensure state is consistent for that fid.
+        //
+        // The typescript code does this by individual fid, but we don't have a
         // good way of doing that efficiently here. We'll just use an array of locks, with each fid
         // deterministically mapped to a lock.
-        let _fid_lock = &self.fid_locks
-            [message.data.as_ref().unwrap().fid as usize % FID_LOCKS_COUNT]
-            .lock()
-            .unwrap();
+        let fid_cache: MutexGuard<'_, FidInfoCache> = {
+            let index: usize = fid as usize % self.fid_caches.len();
+            self.fid_caches[index].lock().unwrap()
+        };
 
         if !self.store_def.is_add_type(message)
             && !(self.store_def.remove_type_supported() && self.store_def.is_remove_type(message))
@@ -637,13 +663,59 @@ impl Store {
 
         let ts_hash = make_ts_hash(message.data.as_ref().unwrap().timestamp, &message.hash)?;
 
-        if self.store_def().is_compact_state_type(message) {
+        let cache_info = fid_cache.get(fid, &self.db);
+
+        // note: timestamp hash starts with big endian epoch so lower in compare should be an earlier time
+        let is_fid_earliest_message = ts_hash < cache_info.earliest_timestamp_hash;
+
+        // fid is over their message limit
+        if max_mesages_for_fid <= cache_info.total_messages {
+            // When fid is over limit we remove their earlier messages to bring them
+            // inline. Don't bother adding if tihs would be their earliest message.
+            if is_fid_earliest_message {
+                return Ok(None);
+            }
+        }
+
+        let summary = if self.store_def().is_compact_state_type(message) {
             self.merge_compact_state(message)
         } else if self.store_def.is_add_type(message) {
             self.merge_add(&ts_hash, message)
         } else {
             self.merge_remove(&ts_hash, message)
+        }?;
+
+        /* update ts hash */
+        if is_fid_earliest_message && summary.messages_added != 0 {
+            cache_info.earliest_timestamp_hash = ts_hash;
+        } else {
+            match summary.new_earliest_ts_hash {
+                Some(MergedTsHashUpdate::NewEarliest(early)) => {
+                    assert!(early < cache_info.earliest_timestamp_hash);
+                    cache_info.earliest_timestamp_hash = early;
+                }
+                Some(MergedTsHashUpdate::RemoveTsHash(removed)) => {
+                    /* earliest entry has been removed, needs updaing */
+                    if cache_info.earliest_timestamp_hash == removed {
+                        cache_info.earliest_timestamp_hash.fill(0);
+
+                        let prefix = UserKeyHeader::new(fid, self.store_def.postfix());
+                        self.db.for_each_iterator_by_prefix(
+                            prefix.as_slice(),
+                            &PageOptions::default(),
+                            |key, _| {
+                                cache_info.earliest_timestamp_hash =
+                                    MessagePrimaryKey::from_slice(key).unwrap().timestamp_hash();
+                                Ok(true)
+                            },
+                        );
+                    }
+                }
+                None => {}
+            }
         }
+
+        Ok(summary.hub_event_bytes)
     }
 
     pub fn revoke(&self, message: &Message) -> Result<Vec<u8>, HubError> {
@@ -709,7 +781,7 @@ impl Store {
         }
     }
 
-    pub fn merge_compact_state(&self, message: &Message) -> Result<Vec<u8>, HubError> {
+    pub fn merge_compact_state(&self, message: &Message) -> Result<MergeSummary, HubError> {
         let mut merge_conflicts = vec![];
 
         // First, find if there's an existing compact state message, and if there is,
@@ -742,16 +814,26 @@ impl Store {
         let (fid, compact_state_timestamp, target_fids) =
             self.read_compact_state_details(message)?;
 
+        let mut new_earliest_ts_hash = None;
+        let mut removed_count = 0;
+
         // Go over all the messages for this Fid, that are older than the compact state message and
         // 1. Delete all remove messages
         // 2. Delete all add messages that are not in the target_fids list
-        let prefix = &make_message_primary_key(fid, self.store_def.postfix(), None);
-        self.db
-            .for_each_iterator_by_prefix(prefix, &PageOptions::default(), |_key, value| {
+        let prefix = UserKeyHeader::new(fid, self.store_def.postfix());
+        self.db.for_each_iterator_by_prefix(
+            prefix.as_slice(),
+            &PageOptions::default(),
+            |key, value| {
                 let message = message_decode(value)?;
 
                 // Only if message is older than the compact state message
-                if message.data.as_ref().unwrap().timestamp > compact_state_timestamp {
+                if compact_state_timestamp < message.data.as_ref().unwrap().timestamp {
+                    if new_earliest_ts_hash.is_none() {
+                        let key = MessagePrimaryKey::from_slice(key).unwrap();
+                        new_earliest_ts_hash = Some(key.timestamp_hash());
+                    }
+
                     // Finish the iteration since all future messages will have greater timestamp
                     return Ok(true);
                 }
@@ -759,24 +841,35 @@ impl Store {
                 if self.store_def.is_remove_type(&message) {
                     merge_conflicts.push(message);
                 } else if self.store_def.is_add_type(&message) {
-                    // Get the link_body fid
-                    if let Some(data) = &message.data {
-                        if let Some(Body::LinkBody(link_body)) = &data.body {
-                            if let Some(Target::TargetFid(target_fid)) = link_body.target {
-                                if !target_fids.contains(&target_fid) {
-                                    merge_conflicts.push(message);
+                    'remove_check: {
+                        // Get the link_body fid
+                        if let Some(data) = &message.data {
+                            if let Some(Body::LinkBody(link_body)) = &data.body {
+                                if let Some(Target::TargetFid(target_fid)) = link_body.target {
+                                    if !target_fids.contains(&target_fid) {
+                                        merge_conflicts.push(message);
+                                        break 'remove_check;
+                                    }
                                 }
                             }
+                        }
+
+                        // didn't break out of block so message not removed, set earliest ts hash
+                        if new_earliest_ts_hash.is_none() {
+                            let key = MessagePrimaryKey::from_slice(key).unwrap();
+                            new_earliest_ts_hash = Some(key.timestamp_hash());
                         }
                     }
                 }
 
                 Ok(false) // Continue the iteration
-            })?;
+            },
+        )?;
 
         let mut txn = self.db.txn();
         // Delete all the merge conflicts
         self.delete_many_transaction(&mut txn, &merge_conflicts)?;
+        let messages_removed = merge_conflicts.len() as u32;
 
         // Add the Link compact state message
         self.put_add_compact_state_transaction(&mut txn, message)?;
@@ -795,7 +888,12 @@ impl Store {
         // Serialize the hub_event
         let hub_event_bytes = hub_event.encode_to_vec();
 
-        Ok(hub_event_bytes)
+        Ok(MergeSummary {
+            hub_event_bytes,
+            new_earliest_ts_hash: new_earliest_ts_hash.map(MergedTsHashUpdate::NewEarliest),
+            messages_removed,
+            messages_added: 0,
+        })
     }
 
     pub fn merge_add(
@@ -833,9 +931,30 @@ impl Store {
         }
 
         // Get the merge conflicts first
-        let merge_conflicts = self
+        let merge_conflicts: Vec<Message> = self
             .store_def
             .get_merge_conflicts(&self.db, message, ts_hash)?;
+
+        let mut messages_removed = 0;
+        let mut earliest_ts_hash_removed = None;
+
+        // Check to see
+        for msg in &merge_conflicts {
+            if self.store_def.is_compact_state_type(msg) {
+                continue;
+            }
+
+            let removing_ts_hash =
+                make_ts_hash(message.data.as_ref().unwrap().timestamp, &message.hash)?;
+
+            messages_removed += 1;
+            match &mut earliest_ts_hash_removed {
+                Some(earliest) if *earliest < removing_ts_hash => {}
+                other => {
+                    other.replace(removing_ts_hash);
+                }
+            }
+        }
 
         // start a transaction
         let mut txn = self.db.txn();
@@ -859,14 +978,19 @@ impl Store {
         // Serialize the hub_event
         let hub_event_bytes = hub_event.encode_to_vec();
 
-        Ok(hub_event_bytes)
+        Ok(MergeSummary {
+            hub_event_bytes,
+            new_earliest_ts_hash: earliest_ts_hash_removed.map(MergedTsHashUpdate::RemoveTsHash),
+            messages_removed,
+            messages_added: 1,
+        })
     }
 
     pub fn merge_remove(
         &self,
         ts_hash: &[u8; TS_HASH_LENGTH],
         message: &Message,
-    ) -> Result<Vec<u8>, HubError> {
+    ) -> Result<MergeSummary, HubError> {
         // If the store supports compact state messages, we don't merge remove messages before its timestamp
         // If the store supports compact state messages, we don't merge messages that don't exist in the compact state
         if self.store_def.compact_state_type_supported() {
@@ -895,6 +1019,27 @@ impl Store {
             .store_def
             .get_merge_conflicts(&self.db, message, ts_hash)?;
 
+        let mut messages_removed = 0;
+        let mut earliest_ts_hash_removed = None;
+
+        // Check to see
+        for msg in &merge_conflicts {
+            if self.store_def.is_compact_state_type(msg) {
+                continue;
+            }
+
+            let removing_ts_hash =
+                make_ts_hash(message.data.as_ref().unwrap().timestamp, &message.hash)?;
+
+            messages_removed += 1;
+            match &mut earliest_ts_hash_removed {
+                Some(earliest) if *earliest < removing_ts_hash => {}
+                other => {
+                    other.replace(removing_ts_hash);
+                }
+            }
+        }
+
         // start a transaction
         let mut txn = self.db.txn();
 
@@ -918,7 +1063,12 @@ impl Store {
         // Serialize the hub_event
         let hub_event_bytes = hub_event.encode_to_vec();
 
-        Ok(hub_event_bytes)
+        Ok(MergeSummary {
+            hub_event_bytes,
+            new_earliest_ts_hash: earliest_ts_hash_removed.map(MergedTsHashUpdate::RemoveTsHash),
+            messages_removed,
+            messages_added: 1,
+        })
     }
 
     fn prune_messages(
@@ -1216,5 +1366,50 @@ impl Store {
         });
 
         Ok(promise)
+    }
+}
+
+struct MergeSummary {
+    hub_event_bytes: Vec<u8>,
+    new_earliest_ts_hash: Option<MergedTsHashUpdate>,
+    messages_removed: u32,
+    messages_added: u32,
+}
+
+enum MergedTsHashUpdate {
+    NewEarliest([u8; TS_HASH_LENGTH]),
+    RemoveTsHash([u8; TS_HASH_LENGTH]),
+}
+
+impl FidInfoCache {
+    fn new() -> Self {
+        ByFidCache {
+            earliest_timestamps: LruCache::new(1024 * 1024),
+        }
+    }
+
+    pub fn get(&mut self, fid: u32, db: &RocksDB) -> &mut FidInfoCacheEntry {
+        let prefix = self.store_prefix;
+        self.cache_entries
+            .get_or_insert_mut(fid, || FidInfoCacheEntry::from_db(prefix, fid, db))
+    }
+}
+
+impl FidInfoCacheEntry {
+    pub fn from_db(store_prefix: u8, fid: u32, db: &RocksDB) -> Self {
+        let fid_msg_prefix = make_message_primary_key(fid, store_prefix, None);
+
+        let mut entry = FidInfoCacheEntry {
+            total_messages: 0,
+            earliest_timestamp_hash: [0u8; TS_HASH_LENGTH],
+        };
+
+        if let Some((key, count)) = db.first_entry_and_total_from_prefix(&fid_msg_prefix) {
+            /* offset (6) = RootPrefix::User (1) + store prefix (1) + FID_BYTES (4) */
+            entry.earliest_timestamp_hash.copy_from_slice(&key[6..]);
+            entry.total_messages = count;
+        }
+
+        entry
     }
 }

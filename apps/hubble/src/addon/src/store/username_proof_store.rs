@@ -2,8 +2,8 @@ use super::{
     get_message, hub_error_to_js_throw, make_fid_key, make_user_key, read_fid_key,
     store::{Store, StoreDef},
     utils::{self, encode_messages_to_js_object, get_page_options, get_store},
-    HubError, IntoU8, MessagesPage, PageOptions, RootPrefix, StoreEventHandler, UserPostfix,
-    TS_HASH_LENGTH,
+    HubError, IntoU8, MessagePrimaryKey, MessagesPage, PageOptions, RootPrefix, StoreEventHandler,
+    UserKeyHeader, UserPostfix, TS_HASH_LENGTH,
 };
 use crate::protos::{
     hub_event, message_data::Body, HubEvent, HubEventType, MergeUserNameProofBody, UserNameType,
@@ -25,8 +25,8 @@ pub struct UsernameProofStoreDef {
 }
 
 impl StoreDef for UsernameProofStoreDef {
-    fn postfix(&self) -> u8 {
-        UserPostfix::UsernameProofMessage.as_u8()
+    fn postfix(&self) -> UserPostfix {
+        UserPostfix::UsernameProofMessage
     }
 
     fn add_message_type(&self) -> u8 {
@@ -202,9 +202,14 @@ impl StoreDef for UsernameProofStoreDef {
                 if let Ok(existing_message_ts_hash) = db.get(existing_add_key.as_slice()) {
                     if let Ok(Some(existing_message)) = get_message(
                         db,
-                        fid,
-                        self.postfix(),
-                        &utils::vec_to_u8_24(&existing_message_ts_hash)?,
+                        &MessagePrimaryKey::new(
+                            fid,
+                            self.postfix(),
+                            existing_message_ts_hash.as_ref().ok_or_else(|| HubError {
+                                code: "bad_request.internal_error".to_string(),
+                                message: "message_ts_hash is not 24 bytes: None".to_string(),
+                            })?,
+                        )?,
                     ) {
                         let message_compare = self.message_compare(
                             self.add_message_type(),
@@ -342,10 +347,9 @@ impl UsernameProofStoreDef {
     }
 
     fn make_username_proof_by_fid_key(fid: u32, name: &Vec<u8>) -> Vec<u8> {
-        let mut key = Vec::with_capacity(1 + 4 + 1 + name.len());
+        let mut key = Vec::with_capacity(std::mem::size_of::<UserKeyHeader>() + name.len());
 
-        key.extend_from_slice(&make_user_key(fid));
-        key.push(UserPostfix::UserNameProofAdds.as_u8());
+        key.extend_from_slice(UserKeyHeader::new(fid, UserPostfix::UserNameProofAdds).as_slice());
         key.extend(name);
 
         key
