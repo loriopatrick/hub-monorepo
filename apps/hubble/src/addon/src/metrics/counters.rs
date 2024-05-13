@@ -25,8 +25,14 @@ pub struct Counters {
 }
 
 #[derive(Eq, PartialEq, Hash, Debug, Clone, Copy)]
+pub enum FidLockSource {
+    Merge,
+    Prune,
+}
+
+#[derive(Eq, PartialEq, Hash, Debug, Clone, Copy)]
 pub enum StoreAction {
-    FidLock,
+    FidLock(FidLockSource),
     Merge,
     ThreadPoolWait,
     MergeCompactState,
@@ -84,6 +90,7 @@ impl Counters {
                     StoreAction::GetAllMessagesByFid(Some(page_size)) => {
                         Some(format!(",page_size=\"{}\"", *page_size))
                     }
+                    StoreAction::FidLock(source) => Some(format!(",source=\"{:?}\"", source)),
                     _ => None,
                 }
                 .unwrap_or_default();
@@ -93,6 +100,7 @@ impl Counters {
                     let action_str = match action {
                         StoreAction::DeleteMany(_) => "DeleteMany".to_string(),
                         StoreAction::GetAllMessagesByFid(_) => "GetAllMessagesByFid".to_string(),
+                        StoreAction::FidLock(_) => "FidLock".to_string(),
                         action => format!("{action:?}"),
                     };
 

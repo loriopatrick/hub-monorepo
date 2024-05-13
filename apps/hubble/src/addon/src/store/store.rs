@@ -6,7 +6,7 @@ use super::{
 };
 use crate::{
     db::{RocksDB, RocksDbTransactionBatch},
-    metrics::{StoreAction, StoreLifetimeCounter},
+    metrics::{FidLockSource, StoreAction, StoreLifetimeCounter},
     protos::{
         self, hub_event, link_body::Target, message_data::Body, HubEvent, HubEventType,
         MergeMessageBody, Message, MessageType,
@@ -668,7 +668,7 @@ impl Store {
                 break 'get_lock lock;
             }
 
-            let _metric = self.metric(StoreAction::FidLock);
+            let _metric = self.metric(StoreAction::FidLock(FidLockSource::Merge));
             lock.lock().unwrap()
         };
 
@@ -983,6 +983,18 @@ impl Store {
         cached_count: u64,
         units: u64,
     ) -> Result<Vec<HubEvent>, HubError> {
+        let _fid_lock = 'get_lock: {
+            let index = fid as usize % FID_LOCKS_COUNT;
+            let lock = &self.fid_locks[index];
+
+            if let Ok(lock) = lock.try_lock() {
+                break 'get_lock lock;
+            }
+
+            let _metric = self.metric(StoreAction::FidLock(FidLockSource::Prune));
+            lock.lock().unwrap()
+        };
+
         let mut pruned_events = vec![];
 
         let mut count = cached_count;
