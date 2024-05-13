@@ -752,8 +752,8 @@ export class Hub implements HubInterface {
 
     if (RUN_MODE === "normal") {
       await this.l2RegistryProvider.start();
+      await this.fNameRegistryEventsProvider.start();
     }
-    await this.fNameRegistryEventsProvider.start();
 
     const bootstrapAddrs = this.options.bootstrapAddrs ?? [];
 
@@ -778,13 +778,15 @@ export class Hub implements HubInterface {
     await this.registerEventHandlers();
 
     // Start cron tasks
-    this.pruneMessagesJobScheduler.start(this.options.pruneMessagesJobCron);
-    this.periodSyncJobScheduler.start();
-    this.pruneEventsJobScheduler.start(this.options.pruneEventsJobCron);
-    this.checkFarcasterVersionJobScheduler.start();
-    this.validateOrRevokeMessagesJobScheduler.start();
-    this.gossipContactInfoJobScheduler.start("*/1 * * * *"); // Every minute
-    this.checkIncomingPortsJobScheduler.start();
+    if (RUN_MODE === "normal") {
+      this.pruneMessagesJobScheduler.start(this.options.pruneMessagesJobCron);
+      this.periodSyncJobScheduler.start();
+      this.pruneEventsJobScheduler.start(this.options.pruneEventsJobCron);
+      this.checkFarcasterVersionJobScheduler.start();
+      this.validateOrRevokeMessagesJobScheduler.start();
+      this.gossipContactInfoJobScheduler.start("*/1 * * * *"); // Every minute
+      this.checkIncomingPortsJobScheduler.start();
+    }
 
     // Mainnet only jobs
     if (this.options.network === FarcasterNetwork.MAINNET) {
@@ -1254,7 +1256,7 @@ export class Hub implements HubInterface {
 
   private async handleGossipMessage(gossipMessage: GossipMessage, source: PeerId, msgId: string): HubAsyncResult<void> {
     let reportedAsInvalid = false;
-    if (gossipMessage.timestamp) {
+    if (gossipMessage.timestamp && RUN_MODE !== "replay") {
       // If message is older than seenTTL, we will try to merge it, but report it as invalid so it doesn't
       // propogate across the network
       const cutOffTime = getFarcasterTime().unwrapOr(0) - GOSSIP_SEEN_TTL / 1000;
@@ -1623,6 +1625,10 @@ export class Hub implements HubInterface {
     await this.gossipNode.subscribe(this.gossipNode.primaryTopic());
     await this.gossipNode.subscribe(this.gossipNode.contactInfoTopic());
 
+    let firstMessageTs = 0;
+    let lastMessageTs = 0;
+    let messageCount = 0;
+
     this.gossipNode.on("message", async (_topic, message, source, msgId) => {
       await message.match(
         async (gossipMessage: GossipMessage) => {
@@ -1632,7 +1638,17 @@ export class Hub implements HubInterface {
           log.error(error, "failed to decode message");
         },
       );
+
+      messageCount += 1;
+      lastMessageTs = Date.now();
+      if (firstMessageTs === 0) {
+        firstMessageTs = lastMessageTs;
+      }
     });
+
+    setInterval(() => {
+      console.log(`Perf| count: ${messageCount}, ms: ${lastMessageTs - firstMessageTs}`);
+    }, 1000);
 
     this.gossipNode.on("peerConnect", async () => {
       // When we connect to a new node, gossip out our contact info 1 second later.
@@ -1683,8 +1699,13 @@ export class Hub implements HubInterface {
       dedupedMessages.push(...messageBundle.messages.map((message, i) => ({ i, message: ensureMessageData(message) })));
     }
 
+    const dedupDoneTs = Date.now();
+    const elapsedDedup = dedupDoneTs - start;
+
     // Merge the messages
     const mergeResults = await this.engine.mergeMessages(dedupedMessages.map((m) => m.message));
+
+    const elapsedMergedMessages = Date.now() - dedupDoneTs;
 
     for (const [j, result] of mergeResults.entries()) {
       const message = dedupedMessages[j]?.message as Message;
@@ -1762,6 +1783,8 @@ export class Hub implements HubInterface {
         finalFailures: [...finalFailures],
         total: finalResults.length,
         totalTimeMilis,
+        dedupTimeMilis: elapsedDedup,
+        mergedTimeMilis: elapsedMergedMessages,
         timePerMergeMs: Math.round((10 ** 2 * totalTimeMilis) / finalResults.length) / 10 ** 2, // round to 2 places
       },
       "submitMessageBundle merged",

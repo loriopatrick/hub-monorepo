@@ -19,8 +19,9 @@ import { makeFidKey, makeMessagePrimaryKey, makeTsHash, typeToSetPostfix } from 
 import { bytesCompare, getFarcasterTime, HubAsyncResult } from "@farcaster/core";
 import { forEachOnChainEvent } from "../db/onChainEvent.js";
 import { addProgressBar } from "../../utils/progressBars.js";
+import { RUN_MODE } from "../../run_mode.js";
 
-const MAX_PENDING_MESSAGE_COUNT_SCANS = 100;
+const MAX_PENDING_MESSAGE_COUNT_SCANS = RUN_MODE === "replay" ? 100000 : 100;
 
 const makeKey = (fid: number, set: UserMessagePostfix): string => {
   return Buffer.concat([makeFidKey(fid), Buffer.from([set])]).toString("hex");

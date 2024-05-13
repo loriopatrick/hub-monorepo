@@ -1,2 +1,2 @@
 export type RunMode = "normal" | "record" | "replay";
-export const RUN_MODE: RunMode = "record";
+export const RUN_MODE: RunMode = "replay";

@@ -27,6 +27,8 @@ pub struct Counters {
 #[derive(Eq, PartialEq, Hash, Debug, Clone, Copy)]
 pub enum StoreAction {
     FidLock,
+    Merge,
+    ThreadPoolWait,
     MergeCompactState,
     MergeAdd,
     MergeRemove,
@@ -46,15 +48,15 @@ pub enum StoreAction {
 }
 
 impl Counters {
-    pub fn store_action(&self, store_name: String, action: StoreAction, time_ms: u64) {
-        Self::hash_record(&self.store_counters, (store_name, action), time_ms)
+    pub fn store_action(&self, store_name: String, action: StoreAction, time_us: u64) {
+        Self::hash_record(&self.store_counters, (store_name, action), time_us)
     }
 
-    fn hash_record<T: Eq + Hash>(hash: &RwLock<HashMap<T, CounterMetric>>, key: T, time_ms: u64) {
+    fn hash_record<T: Eq + Hash>(hash: &RwLock<HashMap<T, CounterMetric>>, key: T, time_us: u64) {
         {
             let hash_read = hash.read().unwrap();
             if let Some(entry) = hash_read.get(&key) {
-                entry.record_duration(time_ms);
+                entry.record_duration(time_us);
                 return;
             }
         }
@@ -65,7 +67,7 @@ impl Counters {
             hash_map::Entry::Vacant(v) => v.insert(CounterMetric::default()),
         };
 
-        entry.record_duration(time_ms);
+        entry.record_duration(time_us);
     }
 
     pub fn write_to_config<W: std::io::Write>(&self, mut out: W) -> Result<(), std::io::Error> {
@@ -105,44 +107,44 @@ impl Counters {
                         counter.count.load(Ordering::Relaxed)
                     )?;
 
-                    writeln!(out, "#HELP store_total_ms")?;
-                    writeln!(out, "#TYPE store_total_ms counter")?;
+                    writeln!(out, "#HELP store_total_us")?;
+                    writeln!(out, "#TYPE store_total_us counter")?;
                     writeln!(
                         out,
-                        "store_total_ms{{store=\"{}\",action=\"{}\"{}}} {}",
+                        "store_total_us{{store=\"{}\",action=\"{}\"{}}} {}",
                         store,
                         action_str,
                         extra_opt,
-                        counter.total_ms.load(Ordering::Relaxed)
+                        counter.total_us.load(Ordering::Relaxed)
                     )?;
 
-                    writeln!(out, "#HELP store_max_ms")?;
-                    writeln!(out, "#TYPE store_max_ms gauge")?;
+                    writeln!(out, "#HELP store_max_us")?;
+                    writeln!(out, "#TYPE store_max_us gauge")?;
                     writeln!(
                         out,
-                        "store_max_ms{{store=\"{}\",action=\"{}\"{}}} {}",
+                        "store_max_us{{store=\"{}\",action=\"{}\"{}}} {}",
                         store,
                         action_str,
                         extra_opt,
-                        counter.max_ms_value.load(Ordering::Relaxed)
+                        counter.max_us_value.load(Ordering::Relaxed)
                     )?;
 
-                    writeln!(out, "#HELP store_min_ms")?;
-                    writeln!(out, "#TYPE store_min_ms gauge")?;
+                    writeln!(out, "#HELP store_min_us")?;
+                    writeln!(out, "#TYPE store_min_us gauge")?;
                     writeln!(
                         out,
-                        "store_min_ms{{store=\"{}\",action=\"{}\"{}}} {}",
+                        "store_min_us{{store=\"{}\",action=\"{}\"{}}} {}",
                         store,
                         action_str,
                         extra_opt,
-                        counter.min_ms_value.load(Ordering::Relaxed)
+                        counter.min_us_value.load(Ordering::Relaxed)
                     )?;
                 }
             }
         }
 
         self.prints
-            .record_duration(start.elapsed().as_millis() as u64);
+            .record_duration(start.elapsed().as_micros() as u64);
 
         Ok(())
     }
@@ -169,7 +171,7 @@ impl Drop for StoreLifetimeCounter {
         counters().store_action(
             self.store_name.take().unwrap(),
             self.action,
-            self.start.elapsed().as_millis() as u64,
+            self.start.elapsed().as_micros() as u64,
         );
     }
 }
@@ -209,16 +211,16 @@ impl<S: StoreDef> StoreName for PhantomData<S> {
 #[derive(Default)]
 pub struct CounterMetric {
     count: AtomicU64,
-    total_ms: AtomicU64,
+    total_us: AtomicU64,
     extrema_last_update: AtomicU64,
-    max_ms_value: AtomicU64,
-    min_ms_value: AtomicU64,
+    max_us_value: AtomicU64,
+    min_us_value: AtomicU64,
 }
 
 impl CounterMetric {
-    pub fn record_duration(&self, time_ms: u64) {
+    pub fn record_duration(&self, time_us: u64) {
         self.count.fetch_add(1, Ordering::AcqRel);
-        self.total_ms.fetch_add(time_ms, Ordering::AcqRel);
+        self.total_us.fetch_add(time_us, Ordering::AcqRel);
 
         let current_minute = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -231,17 +233,17 @@ impl CounterMetric {
         if last_update != current_minute {
             self.extrema_last_update
                 .store(current_minute, Ordering::Release);
-            self.max_ms_value.store(time_ms, Ordering::Release);
-            self.min_ms_value.store(time_ms, Ordering::Release);
+            self.max_us_value.store(time_us, Ordering::Release);
+            self.min_us_value.store(time_us, Ordering::Release);
         } else {
-            let current = self.max_ms_value.load(Ordering::Acquire);
-            if current < time_ms {
-                self.max_ms_value.store(time_ms, Ordering::Release);
+            let current = self.max_us_value.load(Ordering::Acquire);
+            if current < time_us {
+                self.max_us_value.store(time_us, Ordering::Release);
             }
 
-            let current = self.min_ms_value.load(Ordering::Acquire);
-            if time_ms < current {
-                self.min_ms_value.store(time_ms, Ordering::Release);
+            let current = self.min_us_value.load(Ordering::Acquire);
+            if time_us < current {
+                self.min_us_value.store(time_us, Ordering::Release);
             }
         }
     }
@@ -260,31 +262,31 @@ impl CounterMetric {
             self.count.load(Ordering::Relaxed)
         )?;
 
-        writeln!(out, "#HELP {}_total_ms", prefix)?;
-        writeln!(out, "#TYPE {}_total_ms counter", prefix)?;
+        writeln!(out, "#HELP {}_total_us", prefix)?;
+        writeln!(out, "#TYPE {}_total_us counter", prefix)?;
         writeln!(
             out,
-            "{}_total_ms {}",
+            "{}_total_us {}",
             prefix,
-            self.total_ms.load(Ordering::Relaxed)
+            self.total_us.load(Ordering::Relaxed)
         )?;
 
-        writeln!(out, "#HELP {}_max_ms", prefix)?;
-        writeln!(out, "#TYPE {}_max_ms gauge", prefix)?;
+        writeln!(out, "#HELP {}_max_us", prefix)?;
+        writeln!(out, "#TYPE {}_max_us gauge", prefix)?;
         writeln!(
             out,
-            "{}_max_ms {}",
+            "{}_max_us {}",
             prefix,
-            self.max_ms_value.load(Ordering::Relaxed)
+            self.max_us_value.load(Ordering::Relaxed)
         )?;
 
-        writeln!(out, "#HELP {}_min_ms", prefix)?;
-        writeln!(out, "#TYPE {}_min_ms gauge", prefix)?;
+        writeln!(out, "#HELP {}_min_us", prefix)?;
+        writeln!(out, "#TYPE {}_min_us gauge", prefix)?;
         writeln!(
             out,
-            "{}_min_ms {}",
+            "{}_min_us {}",
             prefix,
-            self.min_ms_value.load(Ordering::Relaxed)
+            self.min_us_value.load(Ordering::Relaxed)
         )?;
 
         Ok(())
@@ -306,34 +308,34 @@ impl CounterMetric {
     //         self.count.load(Ordering::Relaxed)
     //     )?;
 
-    //     writeln!(out, "#HELP {}_total_ms", prefix)?;
-    //     writeln!(out, "#TYPE {}_total_ms counter", prefix)?;
+    //     writeln!(out, "#HELP {}_total_us", prefix)?;
+    //     writeln!(out, "#TYPE {}_total_us counter", prefix)?;
     //     writeln!(
     //         out,
-    //         "{}_total_ms{{{}}} {}",
+    //         "{}_total_us{{{}}} {}",
     //         prefix,
     //         opt,
-    //         self.total_ms.load(Ordering::Relaxed)
+    //         self.total_us.load(Ordering::Relaxed)
     //     )?;
 
-    //     writeln!(out, "#HELP {}_max_ms", prefix)?;
-    //     writeln!(out, "#TYPE {}_max_ms gauge", prefix)?;
+    //     writeln!(out, "#HELP {}_max_us", prefix)?;
+    //     writeln!(out, "#TYPE {}_max_us gauge", prefix)?;
     //     writeln!(
     //         out,
-    //         "{}_max_ms{{{}}} {}",
+    //         "{}_max_us{{{}}} {}",
     //         prefix,
     //         opt,
-    //         self.max_ms_value.load(Ordering::Relaxed)
+    //         self.max_us_value.load(Ordering::Relaxed)
     //     )?;
 
-    //     writeln!(out, "#HELP {}_min_ms", prefix)?;
-    //     writeln!(out, "#TYPE {}_min_ms gauge", prefix)?;
+    //     writeln!(out, "#HELP {}_min_us", prefix)?;
+    //     writeln!(out, "#TYPE {}_min_us gauge", prefix)?;
     //     writeln!(
     //         out,
-    //         "{}_min_ms{{{}}} {}",
+    //         "{}_min_us{{{}}} {}",
     //         prefix,
     //         opt,
-    //         self.min_ms_value.load(Ordering::Relaxed)
+    //         self.min_us_value.load(Ordering::Relaxed)
     //     )?;
 
     //     Ok(())

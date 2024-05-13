@@ -59,12 +59,12 @@ for i in $(ls "${ROOT_DIR}/.rocks/.overlayfs/rocks-data/"); do
 
     # prepare empty workdir for mount
     WORKDIR="${ROOT_DIR}/.rocks/.overlayfs/rocks-workdir/${i}"
-    rm -rf "${WORKDIR}" || true;
+    sudo rm -rf "${WORKDIR}" || true;
     mkdir "${WORKDIR}";
 
     # prepare empty upperdir for mount (deletes changes)
     UPPERDIR="${ROOT_DIR}/.rocks/.overlayfs/rocks-upperdir/${i}"
-    rm -rf "${UPPERDIR}" || true;
+    sudo rm -rf "${UPPERDIR}" || true;
     mkdir "${UPPERDIR}";
 
     LOWERDIR="${ROOT_DIR}/.rocks/.overlayfs/rocks-data/${i}"

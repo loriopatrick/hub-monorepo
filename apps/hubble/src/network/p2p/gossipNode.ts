@@ -550,18 +550,17 @@ export class GossipNode extends TypedEmitter<NodeEvents> {
     });
 
     if (RUN_MODE === "replay") {
-      // const gossipStream = fs.createWriteStream("gossip_log.json", {flags:'a'});
-      const gossipStreamReader = fs.createReadStream("gossip_log.json");
-      const gossipStreamLines = readline.createInterface({
-        input: gossipStreamReader,
-        crlfDelay: Infinity,
-      });
-
       setTimeout(async () => {
+        const gossipStreamReader = fs.createReadStream("gossip_log.json");
+        const gossipStreamLines = readline.createInterface({
+          input: gossipStreamReader,
+          crlfDelay: Infinity,
+        });
+
         gossipStreamLines.on("line", (encoded_gossip: string) => {
           const json = JSON.parse(encoded_gossip);
           const data = new Uint8Array(Buffer.from(json.data, "base64"));
-          const source = peerIdFromBytes(new Uint8Array(Buffer.from(json.sourceBytes, "base64")));
+          const source = json.source ? peerIdFromString(json.source) : null;
           const msgId = json.msgId;
           const decoded = GossipNode.decodeMessage(data);
 
@@ -604,15 +603,17 @@ export class GossipNode extends TypedEmitter<NodeEvents> {
           }
 
           if (gossipStreamWriter !== null) {
-            const peer = detail.propagationSource as PeerId;
+            const peer = detail.propagationSource as PeerId | null;
 
             const recordData = {
               data: Buffer.from(data).toString("base64"),
-              sourceBytes: Buffer.from(peer.toBytes()).toString("base64"),
+              source: peer ? peer.toString() : null,
               msgId: detail.msgId,
             };
 
-            console.log("record data", JSON.stringify(recordData));
+            const recordJson = JSON.stringify(recordData);
+            gossipStreamWriter.write(`${recordJson}\n`);
+            // console.log("record data", recordJson);
           }
 
           this.emit("message", detail.msg.topic, decoded, detail.propagationSource, detail.msgId);

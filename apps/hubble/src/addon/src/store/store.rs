@@ -90,7 +90,7 @@ impl From<std::io::Error> for HubError {
     }
 }
 
-pub const FID_LOCKS_COUNT: usize = 4;
+pub const FID_LOCKS_COUNT: usize = 256;
 pub const PAGE_SIZE_MAX: usize = 10_000;
 
 #[derive(Debug, Default)]
@@ -343,7 +343,7 @@ pub trait StoreDef: Send + Sync {
 pub struct Store {
     store_def: Box<dyn StoreDef>,
     store_event_handler: Arc<StoreEventHandler>,
-    fid_locks: Arc<[Mutex<()>; 4]>,
+    fid_locks: Arc<[Mutex<()>]>,
     db: Arc<RocksDB>,
     logger: slog::Logger,
 }
@@ -361,12 +361,13 @@ impl Store {
         Store {
             store_def,
             store_event_handler,
-            fid_locks: Arc::new([
-                Mutex::new(()),
-                Mutex::new(()),
-                Mutex::new(()),
-                Mutex::new(()),
-            ]),
+            fid_locks: {
+                let mut locks = Vec::with_capacity(FID_LOCKS_COUNT);
+                for _ in 0..FID_LOCKS_COUNT {
+                    locks.push(Mutex::new(()));
+                }
+                locks.into()
+            },
             db,
             logger: LOGGER.new(o!("component" => "Store")),
         }
@@ -653,17 +654,23 @@ impl Store {
     }
 
     pub fn merge(&self, message: &Message) -> Result<Vec<u8>, HubError> {
+        let _metric = self.metric(StoreAction::Merge);
+
         // Grab a merge lock. The typescript code does this by individual fid, but we don't have a
         // good way of doing that efficiently here. We'll just use an array of locks, with each fid
         // deterministically mapped to a lock.
-        let lock_metric = self.metric(StoreAction::FidLock);
 
-        let _fid_lock = &self.fid_locks
-            [message.data.as_ref().unwrap().fid as usize % FID_LOCKS_COUNT]
-            .lock()
-            .unwrap();
+        let _fid_lock = 'get_lock: {
+            let index = message.data.as_ref().unwrap().fid as usize % FID_LOCKS_COUNT;
+            let lock = &self.fid_locks[index];
 
-        drop(lock_metric);
+            if let Ok(lock) = lock.try_lock() {
+                break 'get_lock lock;
+            }
+
+            let _metric = self.metric(StoreAction::FidLock);
+            lock.lock().unwrap()
+        };
 
         if !self.store_def.is_add_type(message)
             && !(self.store_def.remove_type_supported() && self.store_def.is_remove_type(message))
@@ -1044,7 +1051,7 @@ impl Store {
         Ok(messages)
     }
 
-    fn metric(&self, action: StoreAction) -> StoreLifetimeCounter {
+    pub fn metric(&self, action: StoreAction) -> StoreLifetimeCounter {
         StoreLifetimeCounter::new(self.store_def.as_ref(), action)
     }
 }
@@ -1114,7 +1121,10 @@ impl Store {
 
         // We run the merge in a threadpool because it can be very CPU intensive and it will block
         // the NodeJS main thread.
+        let metric = store.metric(StoreAction::ThreadPoolWait);
         THREAD_POOL.lock().unwrap().execute(move || {
+            drop(metric);
+
             let results = messages
                 .into_iter()
                 .map(|message| match message {
@@ -1191,7 +1201,10 @@ impl Store {
 
         // We run the prune in a threadpool because it can be very CPU intensive and it will block
         // the NodeJS main thread.
+        let metric = store.metric(StoreAction::ThreadPoolWait);
         THREAD_POOL.lock().unwrap().execute(move || {
+            drop(metric);
+
             // Run the prune job in a separate thread
             let prune_result = store.prune_messages(fid, cached_count, units);
 

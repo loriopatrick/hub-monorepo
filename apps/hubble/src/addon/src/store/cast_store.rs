@@ -8,6 +8,7 @@ use super::{
 };
 use crate::{
     db::{RocksDB, RocksDbTransactionBatch},
+    metrics::StoreAction,
     protos::{self, Message, MessageType},
 };
 use crate::{
@@ -537,7 +538,10 @@ impl CastStore {
         let channel = cx.channel();
         let (deferred, promise) = cx.promise();
 
+        let metric = store.metric(StoreAction::ThreadPoolWait);
         THREAD_POOL.lock().unwrap().execute(move || {
+            drop(metric);
+
             let messages = Self::get_cast_adds_by_fid(&store, fid, &page_options);
 
             deferred_settle_messages(deferred, &channel, messages);
@@ -563,7 +567,10 @@ impl CastStore {
         let channel = cx.channel();
         let (deferred, promise) = cx.promise();
 
+        let metric = store.metric(StoreAction::ThreadPoolWait);
         THREAD_POOL.lock().unwrap().execute(move || {
+            drop(metric);
+
             let messages = Self::get_cast_removes_by_fid(&store, fid, &page_options);
             deferred_settle_messages(deferred, &channel, messages);
         });
@@ -722,7 +729,10 @@ impl CastStore {
         let channel = cx.channel();
         let (deferred, promise) = cx.promise();
 
+        let metric = store.metric(StoreAction::ThreadPoolWait);
         THREAD_POOL.lock().unwrap().execute(move || {
+            drop(metric);
+
             let messages = Self::get_casts_by_mention(&store, mention, &page_options);
 
             deferred_settle_messages(deferred, &channel, messages);

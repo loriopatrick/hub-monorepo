@@ -8,6 +8,7 @@ use super::{
 };
 use crate::{
     db::{RocksDB, RocksDbTransactionBatch},
+    metrics::StoreAction,
     protos::{self, reaction_body::Target, Message, MessageType, ReactionBody, ReactionType},
 };
 use crate::{protos::message_data, THREAD_POOL};
@@ -485,7 +486,10 @@ impl ReactionStore {
         let channel = cx.channel();
         let (deferred, promise) = cx.promise();
 
+        let metric = store.metric(StoreAction::ThreadPoolWait);
         THREAD_POOL.lock().unwrap().execute(move || {
+            drop(metric);
+
             let messages =
                 ReactionStore::get_reaction_adds_by_fid(&store, fid, reaction_type, &page_options);
 
@@ -528,7 +532,10 @@ impl ReactionStore {
         let channel = cx.channel();
         let (deferred, promise) = cx.promise();
 
+        let metric = store.metric(StoreAction::ThreadPoolWait);
         THREAD_POOL.lock().unwrap().execute(move || {
+            drop(metric);
+
             let messages = ReactionStore::get_reaction_removes_by_fid(
                 &store,
                 fid,
@@ -633,7 +640,10 @@ impl ReactionStore {
         let channel = cx.channel();
         let (deferred, promise) = cx.promise();
 
+        let metric = store.metric(StoreAction::ThreadPoolWait);
         THREAD_POOL.lock().unwrap().execute(move || {
+            drop(metric);
+
             let messages = ReactionStore::get_reactions_by_target(
                 &store,
                 &target,
