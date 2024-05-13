@@ -95,6 +95,7 @@ import { MerkleTrie } from "./network/sync/merkleTrie.js";
 import { DEFAULT_CATCHUP_SYNC_SNAPSHOT_MESSAGE_LIMIT } from "./defaultConfig.js";
 import { diagnosticReporter } from "./utils/diagnosticReport.js";
 import { startupCheck, StartupCheckStatus } from "./utils/startupCheck.js";
+import { RUN_MODE } from "./run_mode.js";
 
 export type HubSubmitSource = "gossip" | "rpc" | "eth-provider" | "l2-provider" | "sync" | "fname-registry";
 
@@ -749,7 +750,9 @@ export class Hub implements HubInterface {
       await this.adminServer.start(this.options.adminServerHost ?? "127.0.0.1");
     }
 
-    await this.l2RegistryProvider.start();
+    if (RUN_MODE === "normal") {
+      await this.l2RegistryProvider.start();
+    }
     await this.fNameRegistryEventsProvider.start();
 
     const bootstrapAddrs = this.options.bootstrapAddrs ?? [];
