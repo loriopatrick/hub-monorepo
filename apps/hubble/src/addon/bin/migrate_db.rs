@@ -1,5 +1,5 @@
 use std::{
-    sync::{mpsc::channel, Arc},
+    sync::{mpsc::sync_channel, Arc},
     time::Instant,
 };
 
@@ -7,6 +7,7 @@ use addon::{db::RocksDB, store::PageOptions};
 use rocksdb::{DBCompressionType, Options};
 
 const THREADS: usize = 16;
+const COUNT_PER_PRINT: usize = 500_000;
 
 fn main() {
     println!("Starting");
@@ -36,7 +37,7 @@ fn main() {
     let mut senders = vec![];
 
     for i in 0..THREADS {
-        let (item_tx, item_rx) = channel::<(&'static [u8], &'static [u8])>();
+        let (item_tx, item_rx) = sync_channel::<(&'static [u8], &'static [u8])>(2048);
 
         senders.push(item_tx);
 
@@ -64,10 +65,10 @@ fn main() {
                 .send(unsafe { (std::mem::transmute(key), std::mem::transmute(value)) })
                 .unwrap();
 
-            if count % 100_000 == 0 {
+            if count % COUNT_PER_PRINT == 0 {
                 let now = Instant::now();
-                let elapsed = now.duration_since(last_count_ts).as_millis();
-                let per_second = elapsed as f64 / 100.0;
+                let elapsed = now.duration_since(last_count_ts).as_secs_f64();
+                let per_second = COUNT_PER_PRINT as f64 / elapsed;
                 last_count_ts = now;
                 println!("queued {}, {per_second}mps", count);
             }
