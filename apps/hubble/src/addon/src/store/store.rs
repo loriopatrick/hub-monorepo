@@ -90,7 +90,7 @@ impl From<std::io::Error> for HubError {
     }
 }
 
-pub const FID_LOCKS_COUNT: usize = 256;
+pub const FID_LOCKS_COUNT: usize = 4;
 pub const PAGE_SIZE_MAX: usize = 10_000;
 
 #[derive(Debug, Default)]

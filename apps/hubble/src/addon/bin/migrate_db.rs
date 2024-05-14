@@ -6,38 +6,43 @@ use std::{
 use addon::{db::RocksDB, store::PageOptions};
 use rocksdb::{DBCompressionType, Options};
 
-const THREADS: usize = 16;
+const THREADS: usize = 8;
 const COUNT_PER_PRINT: usize = 500_000;
 
 fn main() {
-    println!("Starting");
+    let mut opts = Options::default();
+    opts.set_compression_type(DBCompressionType::Lz4);
+    opts.create_if_missing(true);
+    opts.set_allow_concurrent_memtable_write(true);
+    opts.increase_parallelism(4);
 
-    let source_db = RocksDB::new(
+    migrate_db(
         "/home/plorio/src/farcaster/hub-monorepo/apps/hubble/.rocks/rocks.hub._default",
-    )
-    .unwrap();
-    let dest_db = Arc::new(
-        RocksDB::new(
-            "/home/plorio/src/farcaster/hub-monorepo/apps/hubble/.rocks3/rocks.hub._default",
-        )
-        .unwrap(),
+        "/home/plorio/src/farcaster/hub-monorepo/apps/hubble/.rocks-lz4/rocks.hub._default",
+        opts.clone(),
     );
 
+    migrate_db(
+        "/home/plorio/src/farcaster/hub-monorepo/apps/hubble/.rocks/rocks.hub._default/trieDb",
+        "/home/plorio/src/farcaster/hub-monorepo/apps/hubble/.rocks-lz4/rocks.hub._default/trieDb",
+        opts.clone(),
+    );
+}
+
+fn migrate_db(source: &str, dest: &str, opts: Options) -> usize {
+    println!("Starting");
+
+    let source_db = RocksDB::new(source).unwrap();
+    let dest_db = Arc::new(RocksDB::new(dest).unwrap());
+
     source_db.open().unwrap();
-    dest_db
-        .open_with_opt({
-            let mut opt = Options::default();
-            opt.create_if_missing(true);
-            opt.set_compression_type(DBCompressionType::Lz4);
-            opt
-        })
-        .unwrap();
+    dest_db.open_with_opt(opts).unwrap();
 
     let mut threads = vec![];
     let mut senders = vec![];
 
     for i in 0..THREADS {
-        let (item_tx, item_rx) = sync_channel::<(&'static [u8], &'static [u8])>(2048);
+        let (item_tx, item_rx) = sync_channel::<(Vec<u8>, Vec<u8>)>(2048);
 
         senders.push(item_tx);
 
@@ -46,7 +51,7 @@ fn main() {
         let handle = std::thread::spawn(move || {
             println!("Thread {} started", i);
             while let Ok((key, value)) = item_rx.recv() {
-                dest_db.put(key, value).unwrap();
+                dest_db.put(&key, &value).unwrap();
             }
             println!("Thread {} closed", i);
         });
@@ -57,12 +62,27 @@ fn main() {
     let mut count = 0;
     let mut last_count_ts = Instant::now();
 
+    let mut first_key = None;
+    dest_db
+        .for_each_iterator_by_prefix(
+            &[],
+            &PageOptions {
+                reverse: true,
+                ..Default::default()
+            },
+            |key, _| {
+                first_key = Some(key.to_vec());
+                Ok(true)
+            },
+        )
+        .unwrap();
+
     source_db
         .for_each_iterator_by_prefix(&[], &PageOptions::default(), |key, value| {
             count += 1;
 
             senders[count % senders.len()]
-                .send(unsafe { (std::mem::transmute(key), std::mem::transmute(value)) })
+                .send((key.to_vec(), value.to_vec()))
                 .unwrap();
 
             if count % COUNT_PER_PRINT == 0 {
@@ -88,5 +108,7 @@ fn main() {
     println!("DONE writing to database {}", count);
 
     source_db.close().unwrap();
-    dest_db.clear().unwrap();
+    dest_db.close().unwrap();
+
+    count
 }

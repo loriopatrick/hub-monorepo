@@ -105,6 +105,7 @@ impl RocksDB {
         // Create RocksDB options
         let mut opts = Options::default();
         opts.create_if_missing(true); // Creates a database if it does not exist
+                                      // opts.set_allow_concurrent_memtable_write(true);
 
         self.open_with_opt(opts)
     }
