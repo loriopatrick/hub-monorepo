@@ -17,7 +17,7 @@ use neon::types::{
     Finalize, JsArray, JsBoolean, JsBox, JsBuffer, JsFunction, JsNumber, JsObject, JsPromise,
     JsString,
 };
-use rocksdb::{OptimisticTransactionDB, Options, TransactionDB, WriteBatch, WriteOptions, DB};
+use rocksdb::{Options, TransactionDB, WriteBatch, WriteOptions, DB};
 use slog::{info, o, Logger};
 use std::borrow::Borrow;
 use std::collections::HashMap;
@@ -27,7 +27,7 @@ use std::sync::{Arc, RwLock, RwLockReadGuard};
 use tar::Builder;
 use walkdir::WalkDir;
 
-const DB_DIRECTORY: &str = ".rocks";
+pub const DB_DIRECTORY: &str = ".rocks";
 
 /** Hold a transaction. List of key/value pairs that will be committed together */
 pub struct RocksDbTransactionBatch {
@@ -74,7 +74,7 @@ pub struct JsIteratorOptions {
 }
 
 pub struct RocksDB {
-    pub db: RwLock<Option<rocksdb::OptimisticTransactionDB>>,
+    pub db: RwLock<Option<rocksdb::TransactionDB>>,
     pub path: String,
     logger: slog::Logger,
 }
@@ -102,14 +102,21 @@ impl RocksDB {
     }
 
     pub fn open(&self) -> Result<(), HubError> {
-        let mut db_lock = self.db.write().unwrap();
-
         // Create RocksDB options
         let mut opts = Options::default();
         opts.create_if_missing(true); // Creates a database if it does not exist
 
+        self.open_with_opt(opts)
+    }
+
+    pub fn open_with_opt(&self, opts: Options) -> Result<(), HubError> {
+        let mut db_lock = self.db.write().unwrap();
+
+        let mut tx_db_opts = rocksdb::TransactionDBOptions::default();
+        tx_db_opts.set_default_lock_timeout(5000); // 5 seconds
+
         // Open the database with multi-threaded support
-        let db = rocksdb::OptimisticTransactionDB::open(&opts, &self.path)?;
+        let db = rocksdb::TransactionDB::open(&opts, &tx_db_opts, &self.path)?;
         *db_lock = Some(db);
 
         // We put the db in a RwLock to make the compiler happy, but it is strictly not required.
@@ -168,7 +175,7 @@ impl RocksDB {
         result
     }
 
-    pub fn db(&self) -> RwLockReadGuard<'_, Option<OptimisticTransactionDB>> {
+    pub fn db(&self) -> RwLockReadGuard<'_, Option<TransactionDB>> {
         self.db.read().unwrap()
     }
 

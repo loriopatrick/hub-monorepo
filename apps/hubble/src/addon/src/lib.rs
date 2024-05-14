@@ -9,11 +9,11 @@ use std::{convert::TryInto, sync::Mutex};
 use store::{LinkStore, ReactionStore, Store, UserDataStore};
 use threadpool::ThreadPool;
 
-mod db;
-mod logger;
-mod metrics;
-mod store;
-mod trie;
+pub mod db;
+pub mod logger;
+pub mod metrics;
+pub mod store;
+pub mod trie;
 
 mod protos {
     include!(concat!("./", "/proto/protobufs.rs"));
