@@ -3,8 +3,9 @@ use crate::{
     db::{RocksDB, RocksDbTransactionBatch},
     protos::{CastId, Message as MessageProto, MessageData, MessageType},
 };
+use enum_iterator::Sequence;
 use prost::Message as _;
-use std::convert::TryFrom;
+use std::{convert::TryFrom, fmt::Display};
 
 pub const FID_BYTES: usize = 4;
 
@@ -13,8 +14,62 @@ pub const HASH_LENGTH: usize = 20;
 
 pub const TRUE_VALUE: u8 = 1;
 
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+#[repr(transparent)]
+pub struct ColumnFamilyKey(pub u64);
+
+impl ColumnFamilyKey {
+    pub fn keys() -> Vec<ColumnFamilyKey> {
+        let mut keys = vec![ColumnFamilyKey(0)];
+
+        for root in enum_iterator::all::<RootPrefix>() {
+            if root != RootPrefix::User {
+                keys.push(Self::from_key(&[root as u8]));
+                continue;
+            }
+
+            for set in enum_iterator::all::<UserPostfix>() {
+                keys.push(Self::from_key(&[
+                    root as u8, 0, 0, 0, 0, /* FID */
+                    set as u8,
+                ]));
+            }
+        }
+
+        keys
+    }
+
+    pub fn cf_iter() -> impl Iterator<Item = String> {
+        Self::keys().into_iter().map(|v| v.to_string())
+    }
+
+    pub fn from_key(key: &[u8]) -> Self {
+        if key.len() == 0 {
+            return ColumnFamilyKey(0);
+        }
+
+        let root = key[0];
+        let mut value = root as u64;
+
+        if root == RootPrefix::User as u8 {
+            let set = key[5];
+            value |= (set as u64) << 8;
+        }
+
+        ColumnFamilyKey(value)
+    }
+}
+
+impl Display for ColumnFamilyKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "cf-{}", self.0)
+    }
+}
+
 /** Copied from the JS code */
+#[derive(Sequence, PartialEq, Eq, Clone, Copy)]
 #[allow(dead_code)]
+#[repr(u8)]
 pub enum RootPrefix {
     /* Used for multiple purposes, starts with a 4-byte fid */
     User = 1,
@@ -76,6 +131,7 @@ pub enum RootPrefix {
 }
 
 /** Copied from the JS code */
+#[derive(Sequence)]
 #[repr(u8)]
 pub enum UserPostfix {
     /* Message records (1-85) */

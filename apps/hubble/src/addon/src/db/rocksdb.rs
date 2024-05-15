@@ -2,8 +2,8 @@ use crate::db::multi_chunk_writer::MultiChunkWriter;
 use crate::logger::LOGGER;
 use crate::metrics::statsd;
 use crate::store::{
-    self, get_db, get_iterator_options, hub_error_to_js_throw, increment_vec_u8, HubError,
-    PageOptions, PAGE_SIZE_MAX,
+    self, get_db, get_iterator_options, hub_error_to_js_throw, increment_vec_u8, ColumnFamilyKey,
+    HubError, PageOptions, PAGE_SIZE_MAX,
 };
 use crate::trie::merkle_trie::TRIE_DBPATH_PREFIX;
 use crate::THREAD_POOL;
@@ -17,12 +17,16 @@ use neon::types::{
     Finalize, JsArray, JsBoolean, JsBox, JsBuffer, JsFunction, JsNumber, JsObject, JsPromise,
     JsString,
 };
-use rocksdb::{Options, TransactionDB, WriteBatch, WriteOptions, DB};
+use rocksdb::{
+    perf, BoundColumnFamily, DBCompactionStyle, DBCompressionType, MultiThreaded, Options,
+    TransactionDB, WriteBatch, WriteOptions, DB,
+};
 use slog::{info, o, Logger};
 use std::borrow::Borrow;
-use std::collections::HashMap;
+use std::collections::{hash_map, HashMap};
 use std::fs::{self};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock, RwLockReadGuard};
 use tar::Builder;
 use walkdir::WalkDir;
@@ -77,7 +81,12 @@ pub struct RocksDB {
     pub db: RwLock<Option<rocksdb::TransactionDB>>,
     pub path: String,
     logger: slog::Logger,
+    cf_lookup: RwLock<Option<HashMap<ColumnFamilyKey, Arc<BoundColumnFamily<'static>>>>>,
+    pub use_cf: bool,
 }
+
+unsafe impl Sync for RocksDB {}
+unsafe impl Send for RocksDB {}
 
 /** Needed to make sure neon can clean up the RocksDB at the end */
 impl Finalize for RocksDB {}
@@ -90,6 +99,11 @@ impl std::fmt::Debug for RocksDB {
 
 impl RocksDB {
     pub fn new(path: &str) -> Result<RocksDB, HubError> {
+        // let use_cf = !path.ends_with("trieDb");
+        Self::new_opt(path, false)
+    }
+
+    pub fn new_opt(path: &str, use_cf: bool) -> Result<RocksDB, HubError> {
         let logger = LOGGER.new(o!("component" => "RustRocksDB"));
 
         info!(logger, "Creating new RocksDB"; "path" => path);
@@ -98,16 +112,33 @@ impl RocksDB {
             db: RwLock::new(None),
             path: path.to_string(),
             logger,
+            cf_lookup: RwLock::new(None),
+            use_cf,
         })
+    }
+
+    fn cf_handle(&self, key: &[u8]) -> Option<Arc<BoundColumnFamily<'static>>> {
+        let column = ColumnFamilyKey::from_key(key);
+        let lock = self.cf_lookup.read().unwrap();
+
+        let lookup = lock.as_ref()?;
+        if let Some(found) = lookup.get(&column) {
+            return Some(found.clone());
+        }
+        Some(lookup.get(&ColumnFamilyKey(0)).unwrap().clone())
     }
 
     pub fn open(&self) -> Result<(), HubError> {
         // Create RocksDB options
         let mut opts = Options::default();
         opts.create_if_missing(true); // Creates a database if it does not exist
-                                      // opts.set_allow_concurrent_memtable_write(true);
+                                      // opts.set_compression_type(DBCompressionType::Lz4);
 
-        self.open_with_opt(opts)
+        if self.use_cf {
+            self.open_with_opt_cf(opts)
+        } else {
+            self.open_with_opt(opts)
+        }
     }
 
     pub fn open_with_opt(&self, opts: Options) -> Result<(), HubError> {
@@ -119,6 +150,61 @@ impl RocksDB {
         // Open the database with multi-threaded support
         let db = rocksdb::TransactionDB::open(&opts, &tx_db_opts, &self.path)?;
         *db_lock = Some(db);
+
+        // We put the db in a RwLock to make the compiler happy, but it is strictly not required.
+        // We can use unsafe to replace the value directly, and this will work fine, and shave off
+        // 100ns per db read/write operation.
+        // eg:
+        // unsafe {
+        //     let db_ptr = &self.db as *const Option<TransactionDB> as *mut Option<TransactionDB>;
+        //     std::ptr::replace(db_ptr, Some(db));
+        // }
+
+        info!(self.logger, "Opened database"; "path" => &self.path);
+
+        Ok(())
+    }
+
+    pub fn open_with_opt_cf(&self, mut opts: Options) -> Result<(), HubError> {
+        let mut db_lock = self.db.write().unwrap();
+
+        let mut tx_db_opts = rocksdb::TransactionDBOptions::default();
+        tx_db_opts.set_default_lock_timeout(5000); // 5 seconds
+
+        opts.create_missing_column_families(true);
+
+        // Open the database with multi-threaded support
+        let db = rocksdb::TransactionDB::<MultiThreaded>::open_cf(
+            &opts,
+            &tx_db_opts,
+            &self.path,
+            ColumnFamilyKey::cf_iter(),
+        )?;
+        let mut cf_lookup: HashMap<ColumnFamilyKey, Arc<BoundColumnFamily<'static>>> =
+            HashMap::new();
+
+        for column in ColumnFamilyKey::keys() {
+            let column_name = column.to_string();
+            let handle = match db.cf_handle(&column_name) {
+                Some(handle) => handle,
+                None => {
+                    db.create_cf(&column_name, &opts).unwrap();
+                    db.cf_handle(&column_name).unwrap()
+                }
+            };
+
+            // lifetime is stored in Phantom so safe to mutate into 'static
+            cf_lookup.insert(column, unsafe {
+                std::mem::transmute::<Arc<BoundColumnFamily<'_>>, Arc<BoundColumnFamily<'static>>>(
+                    handle,
+                )
+            });
+        }
+
+        db_lock.replace(db);
+
+        let mut lookup_lock = self.cf_lookup.write().unwrap();
+        lookup_lock.replace(cf_lookup);
 
         // We put the db in a RwLock to make the compiler happy, but it is strictly not required.
         // We can use unsafe to replace the value directly, and this will work fine, and shave off
@@ -181,29 +267,72 @@ impl RocksDB {
     }
 
     pub fn keys_exist(&self, keys: &Vec<Vec<u8>>) -> Result<Vec<bool>, HubError> {
-        let db = self.db();
-        let db = db.as_ref().unwrap();
+        if keys.len() == 0 {
+            return Ok(Vec::new());
+        }
 
-        Ok(db
-            .multi_get(keys)
-            .into_iter()
-            .map(|r| match r {
-                Ok(Some(_)) => true,
-                Ok(None) => false,
-                Err(_) => false,
-            })
-            .collect::<Vec<_>>())
+        let cf_lock = self.cf_lookup.read().unwrap();
+        let res = if let Some(cf_lookup) = cf_lock.as_ref() {
+            let db = self.db();
+            let db = db.as_ref().unwrap();
+
+            db.multi_get_cf(keys.iter().map(|key| {
+                (
+                    cf_lookup.get(&ColumnFamilyKey::from_key(key)).unwrap(),
+                    key.as_slice(),
+                )
+            }))
+        } else {
+            let db = self.db();
+            let db = db.as_ref().unwrap();
+
+            db.multi_get(keys)
+        }
+        .into_iter()
+        .map(|r| match r {
+            Ok(Some(_)) => true,
+            Ok(None) => false,
+            Err(_) => false,
+        })
+        .collect::<Vec<_>>();
+
+        Ok(res)
     }
 
     pub fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, HubError> {
-        self.db().as_ref().unwrap().get(key).map_err(|e| HubError {
-            code: "db.internal_error".to_string(),
-            message: e.to_string(),
-        })
+        let cf_handle = self.cf_handle(key);
+        if let Some(handle) = cf_handle {
+            self.db()
+                .as_ref()
+                .unwrap()
+                .get_cf(&handle, key)
+                .map_err(|e| HubError {
+                    code: "db.internal_error".to_string(),
+                    message: e.to_string(),
+                })
+        } else {
+            self.db().as_ref().unwrap().get(key).map_err(|e| HubError {
+                code: "db.internal_error".to_string(),
+                message: e.to_string(),
+            })
+        }
     }
 
     pub fn get_many(&self, keys: &Vec<Vec<u8>>) -> Result<Vec<Vec<u8>>, HubError> {
-        let results = self.db().as_ref().unwrap().multi_get(keys);
+        let cf_lock = self.cf_lookup.read().unwrap();
+        let results = if let Some(cf_lookup) = cf_lock.as_ref() {
+            self.db()
+                .as_ref()
+                .unwrap()
+                .multi_get_cf(keys.iter().map(|key| {
+                    (
+                        cf_lookup.get(&ColumnFamilyKey::from_key(key)).unwrap(),
+                        key.as_slice(),
+                    )
+                }))
+        } else {
+            self.db().as_ref().unwrap().multi_get(keys)
+        };
 
         // If any of the results are Errors, return an error
         let results = results.into_iter().collect::<Result<Vec<_>, _>>()?;
@@ -216,25 +345,49 @@ impl RocksDB {
     }
 
     pub fn put(&self, key: &[u8], value: &[u8]) -> Result<(), HubError> {
-        self.db()
-            .as_ref()
-            .unwrap()
-            .put(key, value)
-            .map_err(|e| HubError {
-                code: "db.internal_error".to_string(),
-                message: e.to_string(),
-            })
+        let handle = self.cf_handle(key);
+
+        if let Some(handle) = handle {
+            self.db()
+                .as_ref()
+                .unwrap()
+                .put_cf(&handle, key, value)
+                .map_err(|e| HubError {
+                    code: "db.internal_error".to_string(),
+                    message: e.to_string(),
+                })
+        } else {
+            self.db()
+                .as_ref()
+                .unwrap()
+                .put(key, value)
+                .map_err(|e| HubError {
+                    code: "db.internal_error".to_string(),
+                    message: e.to_string(),
+                })
+        }
     }
 
     pub fn del(&self, key: &[u8]) -> Result<(), HubError> {
-        self.db()
-            .as_ref()
-            .unwrap()
-            .delete(key)
-            .map_err(|e| HubError {
-                code: "db.internal_error".to_string(),
-                message: e.to_string(),
-            })
+        if let Some(handle) = self.cf_handle(key) {
+            self.db()
+                .as_ref()
+                .unwrap()
+                .delete_cf(&handle, key)
+                .map_err(|e| HubError {
+                    code: "db.internal_error".to_string(),
+                    message: e.to_string(),
+                })
+        } else {
+            self.db()
+                .as_ref()
+                .unwrap()
+                .delete(key)
+                .map_err(|e| HubError {
+                    code: "db.internal_error".to_string(),
+                    message: e.to_string(),
+                })
+        }
     }
 
     pub fn txn(&self) -> RocksDbTransactionBatch {
@@ -242,20 +395,37 @@ impl RocksDB {
     }
 
     pub fn commit(&self, batch: RocksDbTransactionBatch) -> Result<(), HubError> {
-        let db = self.db();
-        if db.is_none() {
+        let lock = self.db();
+
+        if lock.is_none() {
             return Err(HubError {
                 code: "db.internal_error".to_string(),
                 message: "Database is not open".to_string(),
             });
         }
 
-        let txn = db.as_ref().unwrap().transaction();
-        for (key, value) in batch.batch {
-            if value.is_none() {
-                txn.delete(key)?;
-            } else {
-                txn.put(key, value.unwrap())?;
+        let cf_lock = self.cf_lookup.read().unwrap();
+        let db = lock.as_ref().unwrap();
+        let txn = db.transaction();
+
+        if let Some(cf_lookup) = cf_lock.as_ref() {
+            for (key, value) in batch.batch {
+                let key_family = ColumnFamilyKey::from_key(&key);
+                let handle = cf_lookup.get(&key_family).unwrap();
+
+                if value.is_none() {
+                    txn.delete_cf(handle, key)?;
+                } else {
+                    txn.put_cf(handle, key, value.unwrap())?;
+                }
+            }
+        } else {
+            for (key, value) in batch.batch {
+                if value.is_none() {
+                    txn.delete(key)?;
+                } else {
+                    txn.put(key, value.unwrap())?;
+                }
             }
         }
 
@@ -342,7 +512,13 @@ impl RocksDB {
         let iter_opts = RocksDB::get_iterator_options(prefix, &PageOptions::default());
 
         let db = self.db();
-        let mut iter = db.as_ref().unwrap().raw_iterator_opt(iter_opts.opts);
+        let mut iter = if let Some(cf_handle) = self.cf_handle(prefix) {
+            db.as_ref()
+                .unwrap()
+                .raw_iterator_cf_opt(&cf_handle, iter_opts.opts)
+        } else {
+            db.as_ref().unwrap().raw_iterator_opt(iter_opts.opts)
+        };
 
         let mut count = 0;
         iter.seek_to_first();
@@ -371,7 +547,14 @@ impl RocksDB {
         let iter_opts = RocksDB::get_iterator_options(prefix, page_options);
 
         let db = self.db();
-        let mut iter = db.as_ref().unwrap().raw_iterator_opt(iter_opts.opts);
+
+        let mut iter = if let Some(cf_handle) = self.cf_handle(prefix) {
+            db.as_ref()
+                .unwrap()
+                .raw_iterator_cf_opt(&cf_handle, iter_opts.opts)
+        } else {
+            db.as_ref().unwrap().raw_iterator_opt(iter_opts.opts)
+        };
 
         if iter_opts.reverse {
             iter.seek_to_last();
@@ -462,12 +645,27 @@ impl RocksDB {
         let upper_bound = js_opts.lt;
         let reverse = js_opts.reverse;
 
+        let upper_cf = ColumnFamilyKey::from_key(&upper_bound);
+
         let mut opts = rocksdb::ReadOptions::default();
         opts.set_iterate_lower_bound(lower_bound.clone());
         opts.set_iterate_upper_bound(upper_bound);
 
         let db = self.db();
-        let mut iter = db.as_ref().unwrap().raw_iterator_opt(opts);
+
+        let mut iter = if let Some(cf_handle) = self.cf_handle(&lower_bound) {
+            if ColumnFamilyKey::from_key(&lower_bound) != upper_cf {
+                return Err(HubError {
+                    code: "db.invalid_iterator_options".to_string(),
+                    message: "upper and lower bound do not belong to same column family"
+                        .to_string(),
+                });
+            }
+
+            db.as_ref().unwrap().raw_iterator_cf_opt(&cf_handle, opts)
+        } else {
+            db.as_ref().unwrap().raw_iterator_opt(opts)
+        };
 
         if reverse {
             iter.seek_to_last();
@@ -504,32 +702,52 @@ impl RocksDB {
     }
 
     pub fn clear(&self) -> Result<u32, HubError> {
-        let mut deleted;
+        let mut total_deleted = 0;
 
-        loop {
-            // reset deleted count
-            deleted = 0;
-
-            // Iterate over all keys and delete them
-            let mut txn = self.txn();
-            let db = self.db();
-
-            for item in db.as_ref().unwrap().iterator(rocksdb::IteratorMode::Start) {
-                if let Ok((key, _)) = item {
-                    txn.delete(key.to_vec());
-                    deleted += 1;
-                }
-            }
-
-            self.commit(txn)?;
-
-            // Check if we deleted anything
-            if deleted == 0 {
-                break;
+        let cf_lock = self.cf_lookup.read().unwrap();
+        let mut cf_families = vec![None];
+        if let Some(cf_lookup) = cf_lock.as_ref() {
+            for value in cf_lookup.values() {
+                cf_families.push(Some(value));
             }
         }
 
-        Ok(deleted)
+        for family in cf_families {
+            loop {
+                // reset deleted count
+                let mut deleted = 0;
+
+                // Iterate over all keys and delete them
+                let mut txn = self.txn();
+                let db = self.db();
+
+                let items = if let Some(family) = family {
+                    db.as_ref()
+                        .unwrap()
+                        .iterator_cf(family, rocksdb::IteratorMode::Start)
+                } else {
+                    db.as_ref().unwrap().iterator(rocksdb::IteratorMode::Start)
+                };
+
+                for item in items {
+                    if let Ok((key, _)) = item {
+                        txn.delete(key.to_vec());
+                        deleted += 1;
+                    }
+                }
+
+                self.commit(txn)?;
+
+                // Check if we deleted anything
+                if deleted == 0 {
+                    break;
+                }
+
+                total_deleted += deleted;
+            }
+        }
+
+        Ok(total_deleted)
     }
 
     pub fn approximate_size(&self) -> u64 {

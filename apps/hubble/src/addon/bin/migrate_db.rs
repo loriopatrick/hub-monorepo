@@ -4,39 +4,63 @@ use std::{
 };
 
 use addon::{db::RocksDB, store::PageOptions};
-use rocksdb::{DBCompressionType, Options};
+use rocksdb::{AsColumnFamilyRef, ColumnFamily, DBCompressionType, Options, WriteOptions};
 
 const THREADS: usize = 8;
 const COUNT_PER_PRINT: usize = 500_000;
 
 fn main() {
     let mut opts = Options::default();
-    opts.set_compression_type(DBCompressionType::Lz4);
-    opts.create_if_missing(true);
-    opts.set_allow_concurrent_memtable_write(true);
-    opts.increase_parallelism(4);
+    {
+        opts.set_compression_type(DBCompressionType::Lz4);
+        opts.create_if_missing(true);
+        opts.set_allow_concurrent_memtable_write(true);
+    }
+
+    // let mut src_opt = None;
+    // {
+    //     let mut opts = Options::default();
+    //     opts.set_compression_type(DBCompressionType::Lz4);
+    //     opts.create_missing_column_families(true);
+    //     src_opt = Some(opts);
+    // }
+
+    // let mut trie_opt = Options::default();
+    // {
+    //     trie_opt.set_compression_type(DBCompressionType::None);
+    // }
 
     migrate_db(
         "/home/plorio/src/farcaster/hub-monorepo/apps/hubble/.rocks/rocks.hub._default",
-        "/home/plorio/src/farcaster/hub-monorepo/apps/hubble/.rocks-lz4/rocks.hub._default",
+        None,
+        "/home/plorio/src/farcaster/hub-monorepo/apps/hubble/.rocks-column/rocks.hub._default",
         opts.clone(),
     );
 
     migrate_db(
         "/home/plorio/src/farcaster/hub-monorepo/apps/hubble/.rocks/rocks.hub._default/trieDb",
-        "/home/plorio/src/farcaster/hub-monorepo/apps/hubble/.rocks-lz4/rocks.hub._default/trieDb",
-        opts.clone(),
+        None,
+        "/home/plorio/src/farcaster/hub-monorepo/apps/hubble/.rocks-column/rocks.hub._default/trieDb",
+        opts,
     );
 }
 
-fn migrate_db(source: &str, dest: &str, opts: Options) -> usize {
+fn migrate_db(source: &str, src_opts: Option<Options>, dest: &str, opts: Options) -> usize {
     println!("Starting");
 
-    let source_db = RocksDB::new(source).unwrap();
+    let source_db = RocksDB::new_opt(source, false).unwrap();
     let dest_db = Arc::new(RocksDB::new(dest).unwrap());
 
-    source_db.open().unwrap();
-    dest_db.open_with_opt(opts).unwrap();
+    match src_opts {
+        Some(opt) => source_db.open_with_opt(opt).unwrap(),
+        None => source_db.open_with_opt(Options::default()).unwrap(),
+    }
+
+    if dest_db.use_cf {
+        dest_db.open_with_opt_cf(opts).unwrap();
+    } else {
+        dest_db.open_with_opt(opts).unwrap();
+    }
 
     let mut threads = vec![];
     let mut senders = vec![];
@@ -61,21 +85,6 @@ fn migrate_db(source: &str, dest: &str, opts: Options) -> usize {
 
     let mut count = 0;
     let mut last_count_ts = Instant::now();
-
-    let mut first_key = None;
-    dest_db
-        .for_each_iterator_by_prefix(
-            &[],
-            &PageOptions {
-                reverse: true,
-                ..Default::default()
-            },
-            |key, _| {
-                first_key = Some(key.to_vec());
-                Ok(true)
-            },
-        )
-        .unwrap();
 
     source_db
         .for_each_iterator_by_prefix(&[], &PageOptions::default(), |key, value| {
@@ -109,6 +118,8 @@ fn migrate_db(source: &str, dest: &str, opts: Options) -> usize {
 
     source_db.close().unwrap();
     dest_db.close().unwrap();
+
+    println!("DB closed {}", count);
 
     count
 }
