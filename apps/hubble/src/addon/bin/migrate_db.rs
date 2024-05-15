@@ -1,9 +1,12 @@
 use std::{
     sync::{mpsc::sync_channel, Arc},
-    time::Instant,
+    time::{Duration, Instant},
 };
 
-use addon::{db::RocksDB, store::PageOptions};
+use addon::{
+    db::RocksDB,
+    store::{ColumnFamilyKey, PageOptions},
+};
 use rocksdb::{AsColumnFamilyRef, ColumnFamily, DBCompressionType, Options, WriteOptions};
 
 const THREADS: usize = 8;
@@ -16,6 +19,24 @@ fn main() {
         opts.create_if_missing(true);
         opts.set_allow_concurrent_memtable_write(true);
     }
+
+    let start = Instant::now();
+
+    println!("Start opening rocksdb: {}", ColumnFamilyKey::keys().len());
+
+    let db = RocksDB::new(
+        "/home/plorio/src/farcaster/hub-monorepo/apps/hubble/.rocks-column/rocks.hub._default",
+    )
+    .unwrap();
+    db.open().unwrap();
+    db.close().unwrap();
+
+    println!("Rebuild took {}", start.elapsed().as_secs_f32());
+
+    std::thread::sleep(Duration::from_secs(10));
+    println!("waited 10 seconds before dropping db");
+
+    std::mem::drop(db);
 
     // let mut src_opt = None;
     // {
@@ -30,19 +51,19 @@ fn main() {
     //     trie_opt.set_compression_type(DBCompressionType::None);
     // }
 
-    migrate_db(
-        "/home/plorio/src/farcaster/hub-monorepo/apps/hubble/.rocks/rocks.hub._default",
-        None,
-        "/home/plorio/src/farcaster/hub-monorepo/apps/hubble/.rocks-column/rocks.hub._default",
-        opts.clone(),
-    );
+    // migrate_db(
+    //     "/home/plorio/src/farcaster/hub-monorepo/apps/hubble/.rocks/rocks.hub._default",
+    //     None,
+    //     "/home/plorio/src/farcaster/hub-monorepo/apps/hubble/.rocks-column/rocks.hub._default",
+    //     opts.clone(),
+    // );
 
-    migrate_db(
-        "/home/plorio/src/farcaster/hub-monorepo/apps/hubble/.rocks/rocks.hub._default/trieDb",
-        None,
-        "/home/plorio/src/farcaster/hub-monorepo/apps/hubble/.rocks-column/rocks.hub._default/trieDb",
-        opts,
-    );
+    // migrate_db(
+    //     "/home/plorio/src/farcaster/hub-monorepo/apps/hubble/.rocks/rocks.hub._default/trieDb",
+    //     None,
+    //     "/home/plorio/src/farcaster/hub-monorepo/apps/hubble/.rocks-column/rocks.hub._default/trieDb",
+    //     opts,
+    // );
 }
 
 fn migrate_db(source: &str, src_opts: Option<Options>, dest: &str, opts: Options) -> usize {
