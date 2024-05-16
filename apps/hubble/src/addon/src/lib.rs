@@ -249,3 +249,5 @@ fn main(mut cx: ModuleContext) -> NeonResult<()> {
 // Threadpool for use in the store
 use once_cell::sync::Lazy;
 pub static THREAD_POOL: Lazy<Mutex<ThreadPool>> = Lazy::new(|| Mutex::new(ThreadPool::new(4)));
+pub static THREAD_POOL_QUERY: Lazy<Mutex<ThreadPool>> =
+    Lazy::new(|| Mutex::new(ThreadPool::new(4)));

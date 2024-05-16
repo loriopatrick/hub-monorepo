@@ -6,7 +6,7 @@ use crate::store::{
     PageOptions, PAGE_SIZE_MAX,
 };
 use crate::trie::merkle_trie::TRIE_DBPATH_PREFIX;
-use crate::THREAD_POOL;
+use crate::{THREAD_POOL, THREAD_POOL_QUERY};
 use chrono::NaiveDateTime;
 use neon::context::{Context, FunctionContext};
 use neon::handle::Handle;
@@ -17,7 +17,7 @@ use neon::types::{
     Finalize, JsArray, JsBoolean, JsBox, JsBuffer, JsFunction, JsNumber, JsObject, JsPromise,
     JsString,
 };
-use rocksdb::{Options, TransactionDB, WriteBatch, WriteOptions, DB};
+use rocksdb::{DBCompressionType, Options, TransactionDB, WriteBatch, WriteOptions, DB};
 use slog::{info, o, Logger};
 use std::borrow::Borrow;
 use std::collections::HashMap;
@@ -105,7 +105,16 @@ impl RocksDB {
         // Create RocksDB options
         let mut opts = Options::default();
         opts.create_if_missing(true); // Creates a database if it does not exist
-                                      // opts.set_allow_concurrent_memtable_write(true);
+
+        // opts.set_allow_concurrent_memtable_write(true);
+        // opts.increase_parallelism(4);
+
+        // opts.set_num_levels(3);
+        // opts.set_compression_per_level(&[
+        //     DBCompressionType::None,
+        //     DBCompressionType::Lz4,
+        //     DBCompressionType::Lz4hc,
+        // ]);
 
         self.open_with_opt(opts)
     }
@@ -643,7 +652,7 @@ impl RocksDB {
 
         let channel = cx.channel();
         let (deferred, promise) = cx.promise();
-        THREAD_POOL.lock().unwrap().execute(move || {
+        THREAD_POOL_QUERY.lock().unwrap().execute(move || {
             let result = db.keys_exist(&key_vec);
 
             deferred.settle_with(&channel, move |mut cx| match result {
@@ -702,7 +711,7 @@ impl RocksDB {
         let channel = cx.channel();
         let (deferred, promise) = cx.promise();
 
-        THREAD_POOL.lock().unwrap().execute(move || {
+        THREAD_POOL_QUERY.lock().unwrap().execute(move || {
             let result = db.get_many(&key_vec);
 
             deferred.settle_with(&channel, move |mut cx| {
@@ -836,7 +845,7 @@ impl RocksDB {
 
         let channel = cx.channel();
         let (deferred, promise) = cx.promise();
-        THREAD_POOL.lock().unwrap().execute(move || {
+        THREAD_POOL_QUERY.lock().unwrap().execute(move || {
             let result = db.count_keys_at_prefix(&prefix);
             deferred.settle_with(&channel, move |mut cx| {
                 let result = match result {
@@ -865,7 +874,7 @@ impl RocksDB {
 
         let channel = cx.channel();
         let (deferred, promise) = cx.promise();
-        THREAD_POOL.lock().unwrap().execute(move || {
+        THREAD_POOL_QUERY.lock().unwrap().execute(move || {
             let mut results = Vec::new();
             let mut next_page_token = Vec::new();
 

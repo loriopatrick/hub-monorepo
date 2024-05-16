@@ -11,7 +11,7 @@ use crate::store::{
     message, utils, HubError, IntoI32, IntoU8, MessagesPage, PageOptions, RootPrefix, Store,
     StoreDef, StoreEventHandler, UserPostfix, PAGE_SIZE_MAX, TS_HASH_LENGTH,
 };
-use crate::{protos, THREAD_POOL};
+use crate::{protos, THREAD_POOL, THREAD_POOL_QUERY};
 use neon::prelude::{JsPromise, JsString};
 use neon::types::buffer::TypedArray;
 use neon::{
@@ -514,7 +514,7 @@ impl LinkStore {
         let (deferred, promise) = cx.promise();
 
         let metric = store.metric(StoreAction::ThreadPoolWait);
-        THREAD_POOL.lock().unwrap().execute(move || {
+        THREAD_POOL_QUERY.lock().unwrap().execute(move || {
             drop(metric);
 
             let messages = Self::get_link_adds_by_fid(&store, fid, link_type, &page_options);
@@ -536,7 +536,7 @@ impl LinkStore {
         let (deferred, promise) = cx.promise();
 
         let metric = store.metric(StoreAction::ThreadPoolWait);
-        THREAD_POOL.lock().unwrap().execute(move || {
+        THREAD_POOL_QUERY.lock().unwrap().execute(move || {
             drop(metric);
 
             let messages = Self::get_link_removes_by_fid(&store, fid, link_type, &page_options);
@@ -663,7 +663,7 @@ impl LinkStore {
         let (deferred, promise) = cx.promise();
 
         let metric = store.metric(StoreAction::ThreadPoolWait);
-        THREAD_POOL.lock().unwrap().execute(move || {
+        THREAD_POOL_QUERY.lock().unwrap().execute(move || {
             drop(metric);
 
             let messages = Self::get_links_by_target(&store, &target, link_type, &page_options);
@@ -689,7 +689,7 @@ impl LinkStore {
         let (deferred, promise) = cx.promise();
 
         let metric = store.metric(StoreAction::ThreadPoolWait);
-        THREAD_POOL.lock().unwrap().execute(move || {
+        THREAD_POOL_QUERY.lock().unwrap().execute(move || {
             drop(metric);
 
             let messages = Self::get_all_link_messages_by_fid(&store, fid, &page_options);

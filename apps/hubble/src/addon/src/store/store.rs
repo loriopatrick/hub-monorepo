@@ -2,7 +2,7 @@ use super::{
     bytes_compare, delete_message_transaction, get_message, hub_error_to_js_throw,
     make_message_primary_key, message, message_decode, message_encode, put_message_transaction,
     utils::{self, encode_messages_to_js_object, get_page_options, get_store, vec_to_u8_24},
-    MessagesPage, StoreEventHandler, TS_HASH_LENGTH,
+    MessagesPage, RootPrefix, StoreEventHandler, TS_HASH_LENGTH,
 };
 use crate::{
     db::{RocksDB, RocksDbTransactionBatch},
@@ -21,9 +21,12 @@ use neon::{object::Object, types::buffer::TypedArray};
 use prost::Message as _;
 use rocksdb;
 use slog::{o, warn};
-use std::string::ToString;
 use std::sync::{Arc, Mutex};
 use std::{clone::Clone, fmt::Display};
+use std::{
+    string::ToString,
+    sync::{MutexGuard, RwLock, RwLockReadGuard, RwLockWriteGuard},
+};
 
 #[derive(Debug, PartialEq)]
 pub struct HubError {
@@ -343,6 +346,7 @@ pub trait StoreDef: Send + Sync {
 pub struct Store {
     store_def: Box<dyn StoreDef>,
     store_event_handler: Arc<StoreEventHandler>,
+    exclusive_lock: RwLock<()>,
     fid_locks: Arc<[Mutex<()>]>,
     db: Arc<RocksDB>,
     logger: slog::Logger,
@@ -361,6 +365,7 @@ impl Store {
         Store {
             store_def,
             store_event_handler,
+            exclusive_lock: RwLock::new(()),
             fid_locks: {
                 let mut locks = Vec::with_capacity(FID_LOCKS_COUNT);
                 for _ in 0..FID_LOCKS_COUNT {
@@ -441,6 +446,9 @@ impl Store {
             });
         }
 
+        let fid = partial_message.data.as_ref().unwrap().fid;
+
+        let _lock = self.fid_lock(fid, FidLockSource::GetRemove);
         let _metric = self.metric(StoreAction::GetRemoves);
 
         let removes_key = self.store_def.make_remove_key(partial_message)?;
@@ -452,7 +460,7 @@ impl Store {
 
         get_message(
             &self.db,
-            partial_message.data.as_ref().unwrap().fid as u32,
+            fid as u32,
             self.store_def.postfix(),
             &utils::vec_to_u8_24(&message_ts_hash)?,
         )
@@ -467,6 +475,7 @@ impl Store {
     where
         F: Fn(&protos::Message) -> bool,
     {
+        let _lock = self.fid_lock(fid as _, FidLockSource::GetAddsByFid);
         let _metric = self.metric(StoreAction::GetAddsByFid);
 
         let prefix = make_message_primary_key(fid, self.store_def.postfix(), None);
@@ -495,6 +504,7 @@ impl Store {
             });
         }
 
+        let _lock = self.fid_lock(fid as _, FidLockSource::GetRemovesByFid);
         let _metric = self.metric(StoreAction::GetRemovesByFid);
 
         let prefix = make_message_primary_key(fid, self.store_def.postfix(), None);
@@ -660,17 +670,7 @@ impl Store {
         // good way of doing that efficiently here. We'll just use an array of locks, with each fid
         // deterministically mapped to a lock.
 
-        let _fid_lock = 'get_lock: {
-            let index = message.data.as_ref().unwrap().fid as usize % FID_LOCKS_COUNT;
-            let lock = &self.fid_locks[index];
-
-            if let Ok(lock) = lock.try_lock() {
-                break 'get_lock lock;
-            }
-
-            let _metric = self.metric(StoreAction::FidLock(FidLockSource::Merge));
-            lock.lock().unwrap()
-        };
+        let _fid_lock = self.fid_lock(message.data.as_ref().unwrap().fid, FidLockSource::Merge);
 
         if !self.store_def.is_add_type(message)
             && !(self.store_def.remove_type_supported() && self.store_def.is_remove_type(message))
@@ -696,6 +696,10 @@ impl Store {
 
     pub fn revoke(&self, message: &Message) -> Result<Vec<u8>, HubError> {
         let _metric = self.metric(StoreAction::Revoke);
+        let _lock = message
+            .data
+            .as_ref()
+            .map(|data| self.fid_lock(data.fid, FidLockSource::Revoke));
 
         // Start a transaction
         let mut txn = self.db.txn();
@@ -759,7 +763,7 @@ impl Store {
         }
     }
 
-    pub fn merge_compact_state(&self, message: &Message) -> Result<Vec<u8>, HubError> {
+    fn merge_compact_state(&self, message: &Message) -> Result<Vec<u8>, HubError> {
         let _metric = self.metric(StoreAction::MergeCompactState);
 
         let mut merge_conflicts = vec![];
@@ -850,7 +854,7 @@ impl Store {
         Ok(hub_event_bytes)
     }
 
-    pub fn merge_add(
+    fn merge_add(
         &self,
         ts_hash: &[u8; TS_HASH_LENGTH],
         message: &Message,
@@ -916,7 +920,7 @@ impl Store {
         Ok(hub_event_bytes)
     }
 
-    pub fn merge_remove(
+    fn merge_remove(
         &self,
         ts_hash: &[u8; TS_HASH_LENGTH],
         message: &Message,
@@ -977,23 +981,13 @@ impl Store {
         Ok(hub_event_bytes)
     }
 
-    fn prune_messages(
+    pub fn prune_messages(
         &self,
         fid: u32,
         cached_count: u64,
         units: u64,
     ) -> Result<Vec<HubEvent>, HubError> {
-        let _fid_lock = 'get_lock: {
-            let index = fid as usize % FID_LOCKS_COUNT;
-            let lock = &self.fid_locks[index];
-
-            if let Ok(lock) = lock.try_lock() {
-                break 'get_lock lock;
-            }
-
-            let _metric = self.metric(StoreAction::FidLock(FidLockSource::Prune));
-            lock.lock().unwrap()
-        };
+        let _fid_lock = self.fid_lock(fid as _, FidLockSource::Prune);
 
         let mut pruned_events = vec![];
 
@@ -1050,6 +1044,7 @@ impl Store {
         fid: u32,
         page_options: &PageOptions,
     ) -> Result<MessagesPage, HubError> {
+        let _lock = self.fid_lock(fid as _, FidLockSource::GetAllMessagesByFid);
         let _metric = self.metric(StoreAction::GetAllMessagesByFid(page_options.page_size));
 
         let prefix = make_message_primary_key(fid, self.store_def.postfix(), None);
@@ -1061,6 +1056,47 @@ impl Store {
             })?;
 
         Ok(messages)
+    }
+
+    pub(super) fn exclusive_lock(&self) -> RwLockWriteGuard<()> {
+        self.exclusive_lock.write().unwrap()
+    }
+
+    pub(super) fn fid_lock_from_key(
+        &self,
+        key: &[u8],
+        lock_source: FidLockSource,
+    ) -> Option<(RwLockReadGuard<()>, MutexGuard<()>)> {
+        if key.len() < 5 || key[0] != RootPrefix::User as u8 {
+            return None;
+        }
+
+        Some(self.fid_lock(
+            u32::from_be_bytes(key[1..5].try_into().unwrap()) as u64,
+            lock_source,
+        ))
+    }
+
+    pub(super) fn fid_lock(
+        &self,
+        fid: u64,
+        lock_source: FidLockSource,
+    ) -> (RwLockReadGuard<()>, MutexGuard<()>) {
+        let exclusive_read = self.exclusive_lock.read().unwrap();
+
+        let lock = 'get_lock: {
+            let index = fid as usize % FID_LOCKS_COUNT;
+            let lock = &self.fid_locks[index];
+
+            if let Ok(lock) = lock.try_lock() {
+                break 'get_lock lock;
+            }
+
+            let _metric = self.metric(StoreAction::FidLock(lock_source));
+            lock.lock().unwrap()
+        };
+
+        (exclusive_read, lock)
     }
 
     pub fn metric(&self, action: StoreAction) -> StoreLifetimeCounter {
@@ -1258,6 +1294,8 @@ impl Store {
         let (deferred, promise) = cx.promise();
 
         deferred.settle_with(&channel, move |mut cx| {
+            let _lock = store.fid_lock(fid as _, FidLockSource::JsGetMessage);
+
             let message = match get_message(&store.db, fid, set, &ts_hash) {
                 Ok(Some(message)) => message,
                 Ok(None) => {

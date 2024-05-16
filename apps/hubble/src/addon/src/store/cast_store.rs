@@ -8,8 +8,9 @@ use super::{
 };
 use crate::{
     db::{RocksDB, RocksDbTransactionBatch},
-    metrics::StoreAction,
+    metrics::{FidLockSource, StoreAction},
     protos::{self, Message, MessageType},
+    THREAD_POOL_QUERY,
 };
 use crate::{
     protos::{message_data, CastRemoveBody},
@@ -539,7 +540,7 @@ impl CastStore {
         let (deferred, promise) = cx.promise();
 
         let metric = store.metric(StoreAction::ThreadPoolWait);
-        THREAD_POOL.lock().unwrap().execute(move || {
+        THREAD_POOL_QUERY.lock().unwrap().execute(move || {
             drop(metric);
 
             let messages = Self::get_cast_adds_by_fid(&store, fid, &page_options);
@@ -568,7 +569,7 @@ impl CastStore {
         let (deferred, promise) = cx.promise();
 
         let metric = store.metric(StoreAction::ThreadPoolWait);
-        THREAD_POOL.lock().unwrap().execute(move || {
+        THREAD_POOL_QUERY.lock().unwrap().execute(move || {
             drop(metric);
 
             let messages = Self::get_cast_removes_by_fid(&store, fid, &page_options);
@@ -730,7 +731,7 @@ impl CastStore {
         let (deferred, promise) = cx.promise();
 
         let metric = store.metric(StoreAction::ThreadPoolWait);
-        THREAD_POOL.lock().unwrap().execute(move || {
+        THREAD_POOL_QUERY.lock().unwrap().execute(move || {
             drop(metric);
 
             let messages = Self::get_casts_by_mention(&store, mention, &page_options);

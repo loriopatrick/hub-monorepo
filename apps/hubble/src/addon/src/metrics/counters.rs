@@ -28,6 +28,14 @@ pub struct Counters {
 pub enum FidLockSource {
     Merge,
     Prune,
+    StoreAction,
+    GetAddsByFid,
+    GetRemovesByFid,
+    GetAllMessagesByFid,
+    JsGetMessage,
+    Revoke,
+    GetRemove,
+    GetCastsByParent,
 }
 
 #[derive(Eq, PartialEq, Hash, Debug, Clone, Copy)]

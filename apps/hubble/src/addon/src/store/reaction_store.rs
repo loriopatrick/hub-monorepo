@@ -10,6 +10,7 @@ use crate::{
     db::{RocksDB, RocksDbTransactionBatch},
     metrics::StoreAction,
     protos::{self, reaction_body::Target, Message, MessageType, ReactionBody, ReactionType},
+    THREAD_POOL_QUERY,
 };
 use crate::{protos::message_data, THREAD_POOL};
 use neon::{
@@ -487,7 +488,7 @@ impl ReactionStore {
         let (deferred, promise) = cx.promise();
 
         let metric = store.metric(StoreAction::ThreadPoolWait);
-        THREAD_POOL.lock().unwrap().execute(move || {
+        THREAD_POOL_QUERY.lock().unwrap().execute(move || {
             drop(metric);
 
             let messages =
@@ -533,7 +534,7 @@ impl ReactionStore {
         let (deferred, promise) = cx.promise();
 
         let metric = store.metric(StoreAction::ThreadPoolWait);
-        THREAD_POOL.lock().unwrap().execute(move || {
+        THREAD_POOL_QUERY.lock().unwrap().execute(move || {
             drop(metric);
 
             let messages = ReactionStore::get_reaction_removes_by_fid(
@@ -641,7 +642,7 @@ impl ReactionStore {
         let (deferred, promise) = cx.promise();
 
         let metric = store.metric(StoreAction::ThreadPoolWait);
-        THREAD_POOL.lock().unwrap().execute(move || {
+        THREAD_POOL_QUERY.lock().unwrap().execute(move || {
             drop(metric);
 
             let messages = ReactionStore::get_reactions_by_target(
