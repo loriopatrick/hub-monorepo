@@ -13,6 +13,57 @@ const THREADS: usize = 8;
 const COUNT_PER_PRINT: usize = 500_000;
 
 fn main() {
+    open_and_close();
+
+    // let mut opts = Options::default();
+    // {
+    //     opts.set_compression_type(DBCompressionType::Lz4);
+    //     opts.create_if_missing(true);
+    //     opts.set_allow_concurrent_memtable_write(true);
+    // }
+
+    // // let start = Instant::now();
+
+    // // println!("Start opening rocksdb: {}", ColumnFamilyKey::keys().len());
+
+    // // let db = RocksDB::new(
+    // //     "/home/plorio/src/farcaster/hub-monorepo/apps/hubble/.rocks-column/rocks.hub._default",
+    // // )
+    // // .unwrap();
+    // // db.open().unwrap();
+    // // db.close().unwrap();
+
+    // // println!("Rebuild took {}", start.elapsed().as_secs_f32());
+
+    // // std::thread::sleep(Duration::from_secs(10));
+    // // println!("waited 10 seconds before dropping db");
+
+    // // std::mem::drop(db);
+
+    // // let mut src_opt = None;
+    // {
+    //     let mut opts = Options::default();
+    //     opts.set_compression_type(DBCompressionType::Lz4);
+    //     opts.create_missing_column_families(true);
+    //     // src_opt = Some(opts);
+    // }
+
+    // migrate_db(
+    //     "/home/plorio/src/farcaster/hub-monorepo/apps/hubble/.rocks/rocks.hub._default",
+    //     None,
+    //     "/home/plorio/src/farcaster/hub-monorepo/apps/hubble/.rocks-column2/rocks.hub._default",
+    //     opts.clone(),
+    // );
+
+    // // migrate_db(
+    // //     "/home/plorio/src/farcaster/hub-monorepo/apps/hubble/.rocks/rocks.hub._default/trieDb",
+    // //     None,
+    // //     "/home/plorio/src/farcaster/hub-monorepo/apps/hubble/.rocks-column/rocks.hub._default/trieDb",
+    // //     opts,
+    // // );
+}
+
+fn open_and_close() {
     let mut opts = Options::default();
     {
         opts.set_compression_type(DBCompressionType::Lz4);
@@ -25,7 +76,7 @@ fn main() {
     println!("Start opening rocksdb: {}", ColumnFamilyKey::keys().len());
 
     let db = RocksDB::new(
-        "/home/plorio/src/farcaster/hub-monorepo/apps/hubble/.rocks-column/rocks.hub._default",
+        "/home/plorio/src/farcaster/hub-monorepo/apps/hubble/.rocks-column2/rocks.hub._default",
     )
     .unwrap();
     db.open().unwrap();
@@ -33,37 +84,9 @@ fn main() {
 
     println!("Rebuild took {}", start.elapsed().as_secs_f32());
 
-    std::thread::sleep(Duration::from_secs(10));
     println!("waited 10 seconds before dropping db");
-
+    std::thread::sleep(Duration::from_secs(10));
     std::mem::drop(db);
-
-    // let mut src_opt = None;
-    // {
-    //     let mut opts = Options::default();
-    //     opts.set_compression_type(DBCompressionType::Lz4);
-    //     opts.create_missing_column_families(true);
-    //     src_opt = Some(opts);
-    // }
-
-    // let mut trie_opt = Options::default();
-    // {
-    //     trie_opt.set_compression_type(DBCompressionType::None);
-    // }
-
-    // migrate_db(
-    //     "/home/plorio/src/farcaster/hub-monorepo/apps/hubble/.rocks/rocks.hub._default",
-    //     None,
-    //     "/home/plorio/src/farcaster/hub-monorepo/apps/hubble/.rocks-column/rocks.hub._default",
-    //     opts.clone(),
-    // );
-
-    // migrate_db(
-    //     "/home/plorio/src/farcaster/hub-monorepo/apps/hubble/.rocks/rocks.hub._default/trieDb",
-    //     None,
-    //     "/home/plorio/src/farcaster/hub-monorepo/apps/hubble/.rocks-column/rocks.hub._default/trieDb",
-    //     opts,
-    // );
 }
 
 fn migrate_db(source: &str, src_opts: Option<Options>, dest: &str, opts: Options) -> usize {

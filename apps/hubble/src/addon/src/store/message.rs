@@ -20,21 +20,26 @@ pub struct ColumnFamilyKey(pub u64);
 
 impl ColumnFamilyKey {
     pub fn keys() -> Vec<ColumnFamilyKey> {
-        let mut keys = vec![ColumnFamilyKey(0)];
+        let mut keys = vec![
+            ColumnFamilyKey(0),
+            ColumnFamilyKey(1),
+            ColumnFamilyKey(2),
+            ColumnFamilyKey(3),
+        ];
 
-        for root in enum_iterator::all::<RootPrefix>() {
-            if root != RootPrefix::User {
-                keys.push(Self::from_key(&[root as u8]));
-                continue;
-            }
+        // for root in enum_iterator::all::<RootPrefix>() {
+        //     if root != RootPrefix::User {
+        //         keys.push(Self::from_key(&[root as u8]));
+        //         continue;
+        //     }
 
-            for set in enum_iterator::all::<UserPostfix>() {
-                keys.push(Self::from_key(&[
-                    root as u8, 0, 0, 0, 0, /* FID */
-                    set as u8,
-                ]));
-            }
-        }
+        //     for set in enum_iterator::all::<UserPostfix>() {
+        //         keys.push(Self::from_key(&[
+        //             root as u8, 0, 0, 0, 0, /* FID */
+        //             set as u8,
+        //         ]));
+        //     }
+        // }
 
         keys
     }
@@ -49,14 +54,26 @@ impl ColumnFamilyKey {
         }
 
         let root = key[0];
-        let mut value = root as u64;
 
         if root == RootPrefix::User as u8 {
             let set = key[5];
-            value |= (set as u64) << 8;
+
+            if set == UserPostfix::ReactionMessage as u8
+                || set == UserPostfix::ReactionAdds as u8
+                || set == UserPostfix::ReactionRemoves as u8
+            {
+                return ColumnFamilyKey(1);
+            } else if set == UserPostfix::LinkMessage as u8
+                || set == UserPostfix::LinkAdds as u8
+                || set == UserPostfix::LinkRemoves as u8
+            {
+                return ColumnFamilyKey(2);
+            } else if set == UserPostfix::BySigner as u8 {
+                return ColumnFamilyKey(3);
+            }
         }
 
-        ColumnFamilyKey(value)
+        ColumnFamilyKey(0)
     }
 }
 

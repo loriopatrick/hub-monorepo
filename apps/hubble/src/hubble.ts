@@ -906,7 +906,7 @@ export class Hub implements HubInterface {
     }
 
     delta = snapshotMetadata.numMessages - currentItemCount;
-    if (delta > limit) {
+    if (delta > limit && RUN_MODE === "normal") {
       log.info({ delta, limit, current_item_count: currentItemCount }, "catchup sync using snapshot");
       shouldCatchupSync = true;
     }

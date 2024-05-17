@@ -99,8 +99,8 @@ impl std::fmt::Debug for RocksDB {
 
 impl RocksDB {
     pub fn new(path: &str) -> Result<RocksDB, HubError> {
-        let use_cf = !path.ends_with("trieDb");
-        Self::new_opt(path, use_cf)
+        // let use_cf = !path.ends_with("trieDb");
+        Self::new_opt(path, false)
     }
 
     pub fn new_opt(path: &str, use_cf: bool) -> Result<RocksDB, HubError> {
@@ -132,13 +132,13 @@ impl RocksDB {
         // Create RocksDB options
         let mut opts = Options::default();
         opts.create_if_missing(true); // Creates a database if it does not exist
-        opts.set_compression_type(DBCompressionType::Lz4);
 
-        if self.use_cf {
-            self.open_with_opt_cf(opts)
-        } else {
-            self.open_with_opt(opts)
-        }
+        // if self.use_cf {
+        //     opts.set_compression_type(DBCompressionType::Lz4);
+        //     self.open_with_opt_cf(opts)
+        // } else {
+        self.open_with_opt(opts)
+        // }
     }
 
     pub fn open_with_opt(&self, opts: Options) -> Result<(), HubError> {
